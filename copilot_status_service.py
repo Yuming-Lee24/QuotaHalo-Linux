@@ -27,7 +27,7 @@ except ImportError:
 PROJECT_DIR = Path(__file__).resolve().parent
 CACHE_DIR = Path.home() / ".cache" / "copilot-usage"
 STATUS_PATH = CACHE_DIR / "status.json"
-AI_CREDITS_URL = "https://api.github.com/users/{}/settings/billing/usage"
+AI_CREDIT_USAGE_URL = "https://api.github.com/users/{}/settings/billing/ai_credit/usage"
 LEGACY_PREMIUM_REQUEST_URL = (
     "https://api.github.com/users/{}/settings/billing/premium_request/usage"
 )
@@ -38,7 +38,7 @@ HEADERS = {
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 20
 MAX_REQUEST_ATTEMPTS = 3
-DEFAULT_AI_CREDITS_LIMIT = 1500
+AI_CREDIT_ALLOWANCES = (1500.0, 7000.0, 20000.0)
 DEFAULT_LEGACY_REQUEST_LIMIT = 300
 DEFAULT_INTERVAL_SECONDS = 300
 
@@ -152,6 +152,66 @@ def _parse_usage_items(data, predicate, default_model):
     return total, usage_items, daily_usage
 
 
+def _first_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _find_limit_value(data):
+    names = {
+        "includedcredits",
+        "includedaicredits",
+        "includedaiunits",
+        "includedquantity",
+        "monthlyallowance",
+        "monthlycredits",
+        "monthlylimit",
+        "allowance",
+        "creditlimit",
+        "creditslimit",
+        "limit",
+    }
+
+    if isinstance(data, dict):
+        for key, value in data.items():
+            normalized = str(key).replace("_", "").replace("-", "").lower()
+            if normalized in names:
+                number = _first_number(value)
+                if number is not None:
+                    return number
+        for value in data.values():
+            number = _find_limit_value(value)
+            if number is not None:
+                return number
+    elif isinstance(data, list):
+        for item in data:
+            number = _find_limit_value(item)
+            if number is not None:
+                return number
+    return None
+
+
+def _included_quantity(data, predicate):
+    total = 0.0
+    for item in data.get("usageItems", []):
+        if not predicate(item):
+            continue
+        total += _quantity({"quantity": item.get("discountQuantity")})
+    return total
+
+
+def _paid_quantity(data, predicate):
+    total = 0.0
+    for item in data.get("usageItems", []):
+        if not predicate(item):
+            continue
+        total += _quantity({"quantity": item.get("netQuantity")})
+    return total
+
+
 def _response_error(response, username):
     if response.status_code == 401:
         return "Bad credentials. Check GITHUB_TOKEN and token expiry."
@@ -167,7 +227,7 @@ def _get_usage_for_month(token, username, year, month):
     headers = HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
 
-    response = _request_usage(AI_CREDITS_URL.format(username), headers, params)
+    response = _request_usage(AI_CREDIT_USAGE_URL.format(username), headers, params)
     if response.status_code != 200:
         raise RuntimeError(_response_error(response, username))
 
@@ -175,11 +235,19 @@ def _get_usage_for_month(token, username, year, month):
     total, usage_items, daily_usage = _parse_usage_items(
         data, _is_copilot_ai_credit_item, "Copilot AI Credits"
     )
+    limit = _find_limit_value(data)
+    if limit is None:
+        included = _included_quantity(data, _is_copilot_ai_credit_item)
+        paid = _paid_quantity(data, _is_copilot_ai_credit_item)
+        if paid > 0 and included > 0:
+            limit = included
     metadata = {
         "billing_mode": "ai_credits",
         "unit": "credits",
         "unit_label": "AI credits",
-        "source_endpoint": "billing_usage",
+        "source_endpoint": "ai_credit_usage",
+        "limit": limit,
+        "limit_source": "api" if limit is not None else "official_allowance",
     }
 
     if usage_items or total > 0:
@@ -226,18 +294,19 @@ def _calculate_usage_metrics(limit, usage_used, current_day, days_in_month):
     }
 
 
-def _usage_limit(metadata):
-    if metadata.get("billing_mode") == "premium_requests":
-        env_limit = os.getenv("GITHUB_MONTHLY_LIMIT")
-        default_limit = DEFAULT_LEGACY_REQUEST_LIMIT
-    else:
-        env_limit = os.getenv("GITHUB_AI_CREDITS_LIMIT")
-        default_limit = DEFAULT_AI_CREDITS_LIMIT
+def _usage_limit(metadata, usage_used=0):
+    limit = _first_number(metadata.get("limit"))
+    if limit is not None:
+        return limit
 
-    try:
-        return float(env_limit) if env_limit else float(default_limit)
-    except ValueError:
-        return float(default_limit)
+    if metadata.get("billing_mode") == "premium_requests":
+        return float(DEFAULT_LEGACY_REQUEST_LIMIT)
+
+    used = float(usage_used or 0)
+    for allowance in AI_CREDIT_ALLOWANCES:
+        if used <= allowance:
+            return allowance
+    return used
 
 
 def _calculate_projection(limit, usage_used, current_day, days_in_month, now):
@@ -313,7 +382,7 @@ def build_status():
     usage_used, usage_items, daily_usage, metadata = _get_usage_for_month(
         token, username, now.year, now.month
     )
-    limit = _usage_limit(metadata)
+    limit = _usage_limit(metadata, usage_used)
     unit_label = metadata.get("unit_label", "usage")
 
     usage_used_today = daily_usage.get(now.day, 0)
@@ -336,6 +405,7 @@ def build_status():
         "unit_label": unit_label,
         "source_endpoint": metadata.get("source_endpoint"),
         "limit": limit,
+        "limit_source": metadata.get("limit_source"),
         "usage_used": usage_used,
         "usage_used_today": usage_used_today,
         "usage_remaining": metrics["remaining_requests"],

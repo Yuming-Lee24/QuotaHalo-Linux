@@ -2,63 +2,37 @@
 
 [中文说明](README.zh-CN.md)
 
-QuotaHalo Linux is a GNOME Shell top-bar monitor for AI assistant usage and local system status.
-
-It combines GitHub Copilot, OpenAI Codex, Claude Code, CPU, memory, GPU, network throughput, and optional FlClash IP location into one lightweight GNOME extension.
+QuotaHalo Linux is a GNOME top-bar widget that keeps your Copilot, Codex, and Claude usage quotas on screen, along with local system status.
 
 ## What It Shows
 
 - GitHub Copilot AI Credits usage
-- OpenAI Codex 5h session usage
-- OpenAI Codex 7d usage
-- Claude Code 5h session usage
-- Claude Code 7d usage
-- CPU, memory, GPU, and network down/up rates
-- FlClash public IP country flag and country code when FlClash is detected
-
-The AI usage group is placed on the right side of the GNOME clock so the clock stays centered. The system monitor is placed near the right edge of the left panel area.
+- OpenAI Codex 5-hour and 7-day quotas
+- Claude Code 5-hour and 7-day quotas
+- CPU, memory, and GPU usage
+- Network download/upload speed
 
 ## Data Sources
 
-### Copilot
+Codex and Claude quotas come directly from the subscription information of the currently signed-in account, with no extra configuration required.
 
-Copilot usage is fetched from the GitHub Billing API and written to:
-
-```text
-~/.cache/copilot-usage/status.json
-```
-
-Configure it with a local `.env` file:
+Copilot requires a GitHub token to read AI Credits usage. Copy `.env.example` and fill it in:
 
 ```bash
 GITHUB_TOKEN=your_github_personal_access_token_here
 GITHUB_USERNAME=your_github_username_here
-GITHUB_AI_CREDITS_LIMIT=1500
 ```
 
-### Codex
+### Getting a GitHub Fine-Grained Personal Access Token
 
-Codex usage is read from local Codex CLI data:
+1. Open GitHub `Settings` > `Developer settings` > `Personal access tokens` > `Fine-grained tokens`.
+2. Click `Generate new token`.
+3. Give it a name, for example `Copilot Usage Monitor`.
+4. Under `Repository access`, choose `Public Repositories (read-only)` or `All repositories`. QuotaHalo only reads account-level billing information and does not read repository contents.
+5. Under `Account permissions`, find `Plan` and set it to `Read-only`.
+6. Click `Generate token`, then copy the generated token into `GITHUB_TOKEN` in `.env`.
 
-```text
-~/.codex/config.toml
-~/.codex/auth.json
-~/.codex/sessions/**/*.jsonl
-```
-
-### Claude
-
-Claude usage is read from Claude Code OAuth credentials when available:
-
-```text
-~/.claude/.credentials.json
-```
-
-If OAuth usage is unavailable, QuotaHalo can fall back to `claude /usage`. When that fallback creates a pure `/usage` or `usage` transcript, QuotaHalo moves it out of Claude history into:
-
-```text
-~/.cache/quotahalo/claude-usage-query-trash/
-```
+Note: the token must have the `Plan: Read-only` permission, otherwise it cannot read billing and usage information.
 
 ## Install
 
@@ -66,75 +40,43 @@ If OAuth usage is unavailable, QuotaHalo can fall back to `claude /usage`. When 
 git clone https://github.com/eddy0619/QuotaHalo-Linux.git
 cd QuotaHalo-Linux
 
+# Optional: only needed if you want Copilot usage
 cp .env.example .env
-# Edit .env if you want Copilot usage.
+# Fill in .env
 
 ./install.sh
 ```
 
-If GNOME does not reload the extension immediately:
+If the top bar does not update immediately after installation:
 
-- On X11: press `Alt+F2`, type `r`, and press Enter.
-- On Wayland: log out and back in.
-
-## Manual Commands
-
-Refresh Codex and Claude once:
-
-```bash
-python3 quota_halo_status.py --refresh-once
-```
-
-Refresh Copilot once:
-
-```bash
-python3 copilot_status_service.py --once
-```
-
-Clean old Claude usage-query transcripts:
-
-```bash
-python3 quota_halo_status.py --cleanup-claude-usage-queries
-```
-
-## Installed Services
-
-`install.sh` installs a single GNOME extension and two user-level systemd services:
-
-```text
-quotahalo@local
-quotahalo-refresh.timer
-copilot-usage.service
-```
-
-Check service state with:
-
-```bash
-systemctl --user status quotahalo-refresh.timer
-systemctl --user status copilot-usage.service
-```
-
-## Project Layout
-
-```text
-assets/                               icons used by the GNOME extension
-gnome-extension/quotahalo@local/      GNOME Shell extension
-systemd/                              user service templates
-quota_halo_status.py                  Codex and Claude cache refresher
-copilot_status_service.py             Copilot cache refresher
-install.sh                            dependency and extension installer
-install-gnome-extension.sh            GNOME extension and service installer
-```
+- X11: press `Alt+F2`, type `r`, and press Enter.
+- Wayland: log out and back in.
 
 ## Requirements
 
-- Linux with GNOME Shell
+- Linux + GNOME Shell
 - Python 3.10+
-- `requests`
-- `python-dotenv`
 
-## Notes
+The install script automatically installs the required Python dependencies: `requests` and `python-dotenv`.
 
-- `.env` is local-only and must not be committed.
-- The old standalone `copilot-usage-tracker` project is not required.
-- The old GUI tray app is not required.
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
+## Attribution
+
+QuotaHalo Linux is an unofficial project. It is not affiliated with, endorsed by, or sponsored by GitHub, Microsoft, OpenAI, Anthropic, or the GNOME Foundation.
+
+Special thanks to the following open-source projects for reference:
+
+- [burninc0de/copilot-usage-tracker](https://github.com/burninc0de/copilot-usage-tracker)
+- [steipete/CodexBar](https://github.com/steipete/CodexBar)
+
+- The GitHub and GitHub Copilot names, logos, and related icons are owned by GitHub, Inc. and/or Microsoft Corporation.
+- The OpenAI and Codex names, logos, and related icons are owned by OpenAI.
+- The Claude and Anthropic names, logos, and related icons are owned by Anthropic.
+- The GNOME and GNOME Shell names are owned by the GNOME Foundation and its respective rights holders.
+- Third-party names and icons that appear in this project are used solely to identify the corresponding services; these third-party assets are not covered by this project's MIT License.
+- Copilot usage data comes from the GitHub REST Billing API; the token permission requirements follow the `Plan: Read-only` permission for Fine-grained Personal Access Tokens described in GitHub's official documentation.
+
+All trademarks, service names, and icons not explicitly listed remain the property of their respective rights holders.

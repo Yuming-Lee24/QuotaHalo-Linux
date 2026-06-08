@@ -2,69 +2,37 @@
 
 [English](README.md)
 
-QuotaHalo Linux 是一个 GNOME 顶部状态栏监控插件，用来常驻显示 AI 助手额度和本机系统状态。
-
-它把 GitHub Copilot、OpenAI Codex、Claude Code、CPU、内存、GPU、网络上下行，以及可选的 FlClash 公网 IP 属地整合到一个 GNOME Shell 扩展里。
+QuotaHalo Linux 是一个 GNOME 顶部状态栏小工具，可常驻显示 Copilot、Codex、Claude 的使用额度，以及本机系统状态。
 
 ## 显示内容
 
 - GitHub Copilot AI Credits 用量
-- OpenAI Codex 5 小时 session 用量
-- OpenAI Codex 7 天用量
-- Claude Code 5 小时 session 用量
-- Claude Code 7 天用量
-- CPU、内存、GPU、网络下行/上行速率
-- 检测到 FlClash 时，显示公网 IP 的国家旗帜和国家简称
-
-AI 额度组件会放在 GNOME 时间栏右侧，避免挤压居中的时间栏。系统监控组件会放在左侧区域靠右的位置。
-
-点击顶部组件可以展开详情。
+- OpenAI Codex 5 小时额度与 7 天额度
+- Claude Code 5 小时额度与 7 天额度
+- CPU、内存、GPU 使用率
+- 网络下行/上行速度
 
 ## 数据来源
 
-### Copilot
+Codex 和 Claude 的额度直接来自当前登录账号的订阅信息，无需额外配置。
 
-Copilot 用量来自 GitHub Billing API，缓存写入：
-
-```text
-~/.cache/copilot-usage/status.json
-```
-
-需要在本项目目录创建 `.env`：
+Copilot 需要 GitHub token 才能读取 AI Credits 用量。复制 `.env.example` 后填写：
 
 ```bash
 GITHUB_TOKEN=your_github_personal_access_token_here
 GITHUB_USERNAME=your_github_username_here
-GITHUB_AI_CREDITS_LIMIT=1500
 ```
 
-`.env` 只用于本机，不要提交到 Git。
+### 获取 GitHub Fine-Grained Personal Access Token
 
-### Codex
+1. 打开 GitHub `Settings` > `Developer settings` > `Personal access tokens` > `Fine-grained tokens`。
+2. 点击 `Generate new token`。
+3. 填写一个名称，例如 `Copilot Usage Monitor`。
+4. 在 `Repository access` 中选择 `Public Repositories (read-only)` 或 `All repositories`。QuotaHalo 只读取账号级 billing 信息，不会读取仓库内容。
+5. 在 `Account permissions` 中找到 `Plan`，将其设置为 `Read-only`。
+6. 点击 `Generate token`，并将生成的 token 复制到 `.env` 的 `GITHUB_TOKEN`。
 
-Codex 用量来自本机 Codex CLI 数据：
-
-```text
-~/.codex/config.toml
-~/.codex/auth.json
-~/.codex/sessions/**/*.jsonl
-```
-
-插件会读取 Codex CLI 记录的 rate limit 信息，用于显示 5 小时 session 和 7 天用量。
-
-### Claude
-
-Claude 优先读取 Claude Code OAuth 凭据：
-
-```text
-~/.claude/.credentials.json
-```
-
-当 OAuth usage 不可用时，会 fallback 到 `claude /usage`。这条 fallback 可能让 Claude Code 写入一条查询对话，所以 QuotaHalo 会把纯 `/usage` 或 `usage` 查询 transcript 移出 Claude 历史，放到：
-
-```text
-~/.cache/quotahalo/claude-usage-query-trash/
-```
+注意：token 必须具备 `Plan: Read-only` 权限，否则无法读取 billing 和 usage 信息。
 
 ## 安装
 
@@ -72,75 +40,43 @@ Claude 优先读取 Claude Code OAuth 凭据：
 git clone https://github.com/eddy0619/QuotaHalo-Linux.git
 cd QuotaHalo-Linux
 
+# 可选：只有需要 Copilot 用量时才需要配置
 cp .env.example .env
-# 如果需要 Copilot 用量，编辑 .env
+# 填写 .env
 
 ./install.sh
 ```
 
-如果安装后顶部状态栏没有立即刷新：
+如果安装后顶部状态栏没有立即更新：
 
-- X11：按 `Alt+F2`，输入 `r`，回车。
+- X11：按 `Alt+F2`，输入 `r` 后回车。
 - Wayland：注销后重新登录。
-
-## 手动命令
-
-手动刷新 Codex 和 Claude：
-
-```bash
-python3 quota_halo_status.py --refresh-once
-```
-
-手动刷新 Copilot：
-
-```bash
-python3 copilot_status_service.py --once
-```
-
-清理历史中旧的 Claude usage 查询 transcript：
-
-```bash
-python3 quota_halo_status.py --cleanup-claude-usage-queries
-```
-
-## 安装后的服务
-
-`install.sh` 会安装一个 GNOME 扩展和两个 user systemd 服务：
-
-```text
-quotahalo@local
-quotahalo-refresh.timer
-copilot-usage.service
-```
-
-查看服务状态：
-
-```bash
-systemctl --user status quotahalo-refresh.timer
-systemctl --user status copilot-usage.service
-```
-
-## 项目结构
-
-```text
-assets/                               GNOME 扩展使用的图标
-gnome-extension/quotahalo@local/      GNOME Shell 扩展
-systemd/                              user service 模板
-quota_halo_status.py                  Codex 和 Claude 缓存刷新器
-copilot_status_service.py             Copilot 缓存刷新器
-install.sh                            依赖和扩展安装入口
-install-gnome-extension.sh            GNOME 扩展和 systemd 服务安装脚本
-```
 
 ## 依赖
 
 - Linux + GNOME Shell
 - Python 3.10+
-- `requests`
-- `python-dotenv`
 
-## 说明
+安装脚本会自动安装所需的 Python 依赖：`requests`、`python-dotenv`。
 
-- `.env` 已被 `.gitignore` 忽略，不会提交。
-- 旧的 `copilot-usage-tracker` 独立工程不再需要。
-- 旧的 GUI tray app 不再需要。
+## License
+
+本项目使用 MIT License，详情请参阅 [LICENSE](LICENSE)。
+
+## Attribution
+
+QuotaHalo Linux 是一个非官方项目，与 GitHub、Microsoft、OpenAI、Anthropic 或 GNOME Foundation 均无关联，也不代表上述任何组织的认可或背书。
+
+特别感谢以下开源项目提供的参考：
+
+- [burninc0de/copilot-usage-tracker](https://github.com/burninc0de/copilot-usage-tracker)
+- [steipete/CodexBar](https://github.com/steipete/CodexBar)
+
+- GitHub 和 GitHub Copilot 的名称、标识和相关图标归 GitHub, Inc. 和/或 Microsoft Corporation 所有。
+- OpenAI、Codex 的名称、标识和相关图标归 OpenAI 所有。
+- Claude、Anthropic 的名称、标识和相关图标归 Anthropic 所有。
+- GNOME 和 GNOME Shell 的名称归 GNOME Foundation 及其相关权利方所有。
+- 本项目中出现的第三方名称和图标仅用于标识对应的服务；这些第三方资产不在本项目的 MIT License 授权范围之内。
+- Copilot 用量数据来自 GitHub REST Billing API；token 权限说明参考 GitHub 官方文档中对 Fine-grained Personal Access Token `Plan: Read-only` 权限的要求。
+
+所有未特别列出的商标、服务名称和图标均归其各自权利方所有。
