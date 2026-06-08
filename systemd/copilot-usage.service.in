@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh Copilot usage cache
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@
+ExecStart=@PYTHON_BIN@ @REPO_DIR@/copilot_status_service.py --interval 300
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

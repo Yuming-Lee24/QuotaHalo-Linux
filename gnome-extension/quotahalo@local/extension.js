@@ -1,0 +1,2165 @@
+var ByteArray = imports.byteArray;
+var Cairo = imports.cairo;
+var Clutter = imports.gi.Clutter;
+var Gio = imports.gi.Gio;
+var GLib = imports.gi.GLib;
+var St = imports.gi.St;
+
+var ExtensionUtils = imports.misc.extensionUtils;
+var Main = imports.ui.main;
+var PopupMenu = imports.ui.popupMenu;
+var Me = ExtensionUtils.getCurrentExtension();
+
+var CONFIG_PATH = GLib.build_filenamev([Me.path, 'config.json']);
+
+function readInstallConfig() {
+    try {
+        var result = GLib.file_get_contents(CONFIG_PATH);
+        var ok = result[0];
+        var bytes = result[1];
+        if (!ok)
+            return {};
+        return JSON.parse(ByteArray.toString(bytes));
+    } catch (e) {
+        return {};
+    }
+}
+
+var INSTALL_CONFIG = readInstallConfig();
+var PYTHON_PATH = INSTALL_CONFIG.python_bin || '/usr/bin/python3';
+
+var LABEL_PATH = GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '.cache',
+    'quotahalo',
+    'usage-label.txt',
+]);
+var JSON_PATH = GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '.cache',
+    'quotahalo',
+    'usage-status.json',
+]);
+var COPILOT_JSON_PATH = GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '.cache',
+    'copilot-usage',
+    'status.json',
+]);
+var DEBUG_PATH = GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '.cache',
+    'quotahalo',
+    'extension-debug.json',
+]);
+var REFRESH_DEBUG_PATH = GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '.cache',
+    'quotahalo',
+    'extension-refresh-debug.json',
+]);
+var SCRIPT_PATH = INSTALL_CONFIG.status_script || GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '3_work_tools',
+    'QuotaHalo-Linux',
+    'quota_halo_status.py',
+]);
+var COPILOT_SCRIPT_PATH = INSTALL_CONFIG.copilot_script || GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '3_work_tools',
+    'QuotaHalo-Linux',
+    'copilot_status_service.py',
+]);
+var OPENAI_ICON_PATH = GLib.build_filenamev([Me.path, 'openai-icon.png']);
+var CLAUDE_ICON_PATH = GLib.build_filenamev([Me.path, 'claude-icon.png']);
+var COPILOT_ICON_PATH = GLib.build_filenamev([Me.path, 'github-copilot-icon.png']);
+var SYSTEM_UPDATE_SECONDS = 2;
+var USAGE_REFRESH_SECONDS = 30;
+var GPU_CACHE_USEC = 3 * 1000 * 1000;
+var FLCLASH_PROXY_URL = 'http://127.0.0.1:7890';
+var FLCLASH_IPINFO_URL = 'https://ipinfo.io/json';
+var FLCLASH_UPDATE_SECONDS = 60;
+var FLCLASH_INTERFACE_NAME = 'FlClash';
+
+var usageIndicator = null;
+var systemIndicator = null;
+
+function fallbackStatus() {
+    var label = 'Codex --';
+    try {
+        var result = GLib.file_get_contents(LABEL_PATH);
+        var ok = result[0];
+        var bytes = result[1];
+        if (!ok)
+            return { label: label };
+        var text = ByteArray.toString(bytes).trim();
+        label = text || label;
+    } catch (e) {
+    }
+    return { label: label };
+}
+
+function readStatus() {
+    try {
+        var result = GLib.file_get_contents(JSON_PATH);
+        var ok = result[0];
+        var bytes = result[1];
+        if (!ok)
+            return fallbackStatus();
+
+        var status = JSON.parse(ByteArray.toString(bytes));
+        status.label = status.label || 'Codex --';
+        return status;
+    } catch (e) {
+        return fallbackStatus();
+    }
+}
+
+function fallbackCopilotStatus() {
+    return {
+        provider: 'GitHub Copilot',
+        state: 'missing',
+        label: 'Copilot --',
+        updated: 'Never',
+        top_models: [],
+    };
+}
+
+function readCopilotStatus() {
+    try {
+        var result = GLib.file_get_contents(COPILOT_JSON_PATH);
+        if (!result[0])
+            return fallbackCopilotStatus();
+
+        var status = JSON.parse(ByteArray.toString(result[1]));
+        status.label = status.label || 'Copilot --';
+        status.top_models = status.top_models || [];
+        return status;
+    } catch (e) {
+        return fallbackCopilotStatus();
+    }
+}
+
+function resetText(value) {
+    if (!value || value === '--' || value === 'unknown')
+        return 'unknown';
+    return value;
+}
+
+function clampPercent(value) {
+    var n = Number(value);
+    if (isNaN(n))
+        return 0;
+    if (n < 0)
+        return 0;
+    if (n > 100)
+        return 100;
+    return n;
+}
+
+function resetEpochFor(status, usedKey) {
+    var key;
+    var n;
+
+    if (!status)
+        return 0;
+    key = usedKey === 'weekly_used_pct' ? 'weekly_reset_epoch' : 'session_reset_epoch';
+    n = Number(status[key]);
+    if (isNaN(n) || n <= 0)
+        return 0;
+    if (n > 100000000000)
+        n = n / 1000;
+    return n;
+}
+
+function isRateLimitExpired(status, usedKey) {
+    var epoch = resetEpochFor(status, usedKey);
+
+    return epoch > 0 && epoch * 1000 <= Date.now();
+}
+
+function usedPercent(status, usedKey) {
+    if (!status)
+        return 0;
+    if (isRateLimitExpired(status, usedKey))
+        return 0;
+    return clampPercent(status[usedKey]);
+}
+
+function resetTextFor(status, usedKey, value) {
+    if (isRateLimitExpired(status, usedKey))
+        return 'now';
+    return resetText(value);
+}
+
+function usageRingColor(value, provider) {
+    var pct = clampPercent(value);
+    if (pct > 80)
+        return [0.89, 0.29, 0.29, 1.0];
+    if (pct > 50)
+        return [0.91, 0.66, 0.24, 1.0];
+    if (provider === 'copilot')
+        return [0.34, 0.62, 0.96, 1.0];
+    if (provider === 'claude')
+        return [0.85, 0.47, 0.34, 1.0];
+    return [0.06, 0.64, 0.50, 1.0];
+}
+
+function drawProgressBar(area, pctValue, provider) {
+    var alloc = area.get_allocation_box();
+    var width = alloc.x2 - alloc.x1;
+    var height = alloc.y2 - alloc.y1;
+    var padding = 4;
+    var y = Math.max(4, height / 2);
+    var usable = Math.max(0, width - padding * 2);
+    var pct = clampPercent(pctValue);
+    var color = usageRingColor(pct, provider);
+    var cr = area.get_context();
+    var end = padding + usable * pct / 100;
+
+    cr.setLineCap(Cairo.LineCap.ROUND);
+    cr.setLineWidth(Math.max(5, Math.min(7, height - 2)));
+
+    cr.setSourceRGBA(1.0, 1.0, 1.0, 0.12);
+    cr.moveTo(padding, y);
+    cr.lineTo(width - padding, y);
+    cr.stroke();
+
+    if (pct > 0) {
+        cr.setSourceRGBA(color[0], color[1], color[2], color[3]);
+        cr.moveTo(padding, y);
+        cr.lineTo(Math.max(padding + 0.1, end), y);
+        cr.stroke();
+    }
+
+    cr.$dispose();
+}
+
+function panelLabelText(status) {
+    var label = status && status.label ? String(status.label) : 'Codex --';
+    var used;
+
+    if (status && status.provider === 'Codex' &&
+        status.source !== 'none' && status.source !== 'config') {
+        used = Math.round(usedPercent(status, 'session_used_pct'));
+        return String(used) + '%';
+    }
+    if (label.indexOf('Codex ') === 0)
+        return label.slice(6);
+    return label;
+}
+
+function hasClaudeQuota(status) {
+    if (!status)
+        return false;
+    if (status.source === 'none' || status.source === 'config' ||
+        status.source === 'logs' || status.source === 'credentials')
+        return false;
+    return status.session_used_pct !== undefined && status.session_used_pct !== null;
+}
+
+function claudeLabelText(status) {
+    var claude = status && status.claude ? status.claude : null;
+
+    if (!claude || !claude.available)
+        return '';
+    if (!hasClaudeQuota(claude))
+        return '--';
+    return String(Math.round(usedPercent(claude, 'session_used_pct'))) + '%';
+}
+
+function claudeWeeklyUsedPercent(status) {
+    var claude = status && status.claude ? status.claude : null;
+
+    if (!claude || !claude.available || !hasClaudeQuota(claude))
+        return 0;
+    return usedPercent(claude, 'weekly_used_pct');
+}
+
+function copilotUsedPercent(status) {
+    if (!status || status.state === 'missing' || status.state === 'error')
+        return 0;
+    return clampPercent(status.pct_used);
+}
+
+function copilotLabelText(status) {
+    if (!status || status.state === 'missing')
+        return '';
+    if (status.state === 'error')
+        return 'ERR';
+    if (status.pct_used !== undefined && status.pct_used !== null)
+        return String(Math.round(clampPercent(status.pct_used))) + '%';
+    return '--';
+}
+
+function usageNumberText(value, status) {
+    var n = Number(value);
+
+    if (isNaN(n))
+        return '--';
+    if (status && status.unit === 'credits') {
+        if (Math.abs(n) >= 100)
+            return String(Math.round(n));
+        return n.toFixed(1).replace(/\.0$/, '');
+    }
+    return String(Math.round(n));
+}
+
+function copilotUnitText(status) {
+    if (status && status.unit === 'credits')
+        return 'credits';
+    return 'req';
+}
+
+function remainingPercent(status, usedKey, remainingKey) {
+    var value;
+
+    if (!status)
+        return null;
+    if (isRateLimitExpired(status, usedKey))
+        return 100;
+    value = status[remainingKey];
+    if (value !== undefined && value !== null)
+        return Math.round(clampPercent(value));
+    value = status[usedKey];
+    if (value === undefined || value === null)
+        return null;
+    return Math.round(100 - clampPercent(value));
+}
+
+function quotaText(status, usedKey, remainingKey) {
+    var used;
+    var remaining = remainingPercent(status, usedKey, remainingKey);
+
+    if (remaining === null)
+        return '--';
+    if (status[usedKey] === undefined || status[usedKey] === null)
+        return String(remaining) + '% remaining';
+    used = Math.round(usedPercent(status, usedKey));
+    return String(used) + '% used (' + String(remaining) + '% remaining)';
+}
+
+function updatedText(value) {
+    var text = value || 'Never';
+    if (text.indexOf('Updated ') === 0)
+        return 'Updated: ' + text.slice(8);
+    if (text.indexOf('Updated: ') === 0)
+        return text;
+    return 'Updated: ' + text;
+}
+
+function compactUpdatedText(value) {
+    return updatedText(value).replace(/^Updated: /, 'Updated ');
+}
+
+function itemActor(item) {
+    if (!item)
+        return null;
+    return item.actor || item;
+}
+
+function setItemVisible(item, visible) {
+    var actor = itemActor(item);
+
+    if (!actor)
+        return;
+    if (visible)
+        actor.show();
+    else
+        actor.hide();
+}
+
+function addItemStyle(item, styleClass) {
+    var actor = itemActor(item);
+
+    if (actor && actor.add_style_class_name)
+        actor.add_style_class_name(styleClass);
+}
+
+function providerSourceText(status) {
+    var parts = [];
+
+    if (!status)
+        return 'No data';
+    if (status.plan)
+        parts.push(String(status.plan));
+    if (status.model)
+        parts.push(String(status.model));
+    if (status.source && status.source !== 'none')
+        parts.push(String(status.source));
+    if (status.updated && status.updated !== 'Never')
+        parts.push(compactUpdatedText(status.updated));
+    return parts.length ? parts.join('  ·  ') : 'No data';
+}
+
+function actorSummary(actor) {
+    if (!actor)
+        return null;
+    return {
+        text: actor.toString(),
+        visible: actor.visible,
+        mapped: actor.mapped,
+        width: actor.width,
+        height: actor.height,
+    };
+}
+
+function writeDebug(payload) {
+    try {
+        GLib.file_set_contents(DEBUG_PATH, JSON.stringify(payload, null, 2));
+    } catch (e) {
+    }
+}
+
+function writeRefreshDebug(payload) {
+    try {
+        GLib.file_set_contents(REFRESH_DEBUG_PATH, JSON.stringify(payload, null, 2));
+    } catch (e) {
+    }
+}
+
+function readTextFile(path) {
+    try {
+        var result = GLib.file_get_contents(path);
+        if (!result[0])
+            return null;
+        return ByteArray.toString(result[1]);
+    } catch (e) {
+        return null;
+    }
+}
+
+function parseNumber(text) {
+    var n = Number(text);
+    if (isNaN(n))
+        return 0;
+    return n;
+}
+
+function pctText(value) {
+    var text = String(Math.round(clampPercent(value)));
+
+    while (text.length < 3)
+        text = ' ' + text;
+    return text + '%';
+}
+
+function unavailablePctText() {
+    return ' --%';
+}
+
+function formatRate(bytesPerSecond) {
+    var b = Math.max(0, Number(bytesPerSecond) || 0);
+    if (b >= 1024 * 1024 * 1024)
+        return (b / (1024 * 1024 * 1024)).toFixed(1) + 'G';
+    if (b >= 1024 * 1024)
+        return (b / (1024 * 1024)).toFixed(1) + 'M';
+    if (b >= 1024)
+        return (b / 1024).toFixed(1) + 'K';
+    return Math.round(b) + 'B';
+}
+
+function formatBytes(bytes) {
+    var b = Math.max(0, Number(bytes) || 0);
+    if (b >= 1024 * 1024 * 1024)
+        return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GiB';
+    if (b >= 1024 * 1024)
+        return (b / (1024 * 1024)).toFixed(1) + ' MiB';
+    if (b >= 1024)
+        return (b / 1024).toFixed(1) + ' KiB';
+    return Math.round(b) + ' B';
+}
+
+function readCpuSnapshot() {
+    var text = readTextFile('/proc/stat');
+    var parts;
+    var total = 0;
+    var idle = 0;
+    var i;
+
+    if (!text)
+        return null;
+    parts = text.split('\n')[0].trim().split(/\s+/);
+    if (parts[0] !== 'cpu')
+        return null;
+
+    for (i = 1; i < parts.length; i++)
+        total += parseNumber(parts[i]);
+    idle = parseNumber(parts[4]) + parseNumber(parts[5]);
+    return { total: total, idle: idle };
+}
+
+function readMemory() {
+    var text = readTextFile('/proc/meminfo');
+    var lines;
+    var values = {};
+    var i;
+    var match;
+    var total;
+    var available;
+    var used;
+
+    if (!text)
+        return { pct: 0, used: 0, total: 0 };
+    lines = text.split('\n');
+    for (i = 0; i < lines.length; i++) {
+        match = lines[i].match(/^([A-Za-z_()]+):\s+(\d+)/);
+        if (match)
+            values[match[1]] = parseNumber(match[2]) * 1024;
+    }
+    total = values.MemTotal || 0;
+    available = values.MemAvailable || 0;
+    used = Math.max(0, total - available);
+    return {
+        pct: total > 0 ? used * 100 / total : 0,
+        used: used,
+        total: total,
+    };
+}
+
+function shouldCountInterface(name) {
+    if (!name || name === 'lo')
+        return false;
+    if (name.indexOf('docker') === 0 || name.indexOf('br-') === 0)
+        return false;
+    if (name.indexOf('veth') === 0 || name.indexOf('virbr') === 0)
+        return false;
+    if (name.indexOf('tun') === 0 || name.indexOf('tap') === 0)
+        return false;
+    return true;
+}
+
+function readNetSnapshot() {
+    var text = readTextFile('/proc/net/dev');
+    var lines;
+    var i;
+    var line;
+    var pair;
+    var name;
+    var fields;
+    var rx = 0;
+    var tx = 0;
+    var names = [];
+
+    if (!text)
+        return { rx: 0, tx: 0, names: [] };
+    lines = text.split('\n');
+    for (i = 2; i < lines.length; i++) {
+        line = lines[i].trim();
+        if (!line || line.indexOf(':') < 0)
+            continue;
+        pair = line.split(':');
+        name = pair[0].trim();
+        if (!shouldCountInterface(name))
+            continue;
+        fields = pair[1].trim().split(/\s+/);
+        rx += parseNumber(fields[0]);
+        tx += parseNumber(fields[8]);
+        names.push(name);
+    }
+    return { rx: rx, tx: tx, names: names };
+}
+
+function hasNetworkInterface(interfaceName) {
+    var text = readTextFile('/proc/net/dev');
+    var lines;
+    var i;
+    var line;
+    var pair;
+    var name;
+    var target = String(interfaceName || '').toLowerCase();
+
+    if (!text || !target)
+        return false;
+    lines = text.split('\n');
+    for (i = 2; i < lines.length; i++) {
+        line = lines[i].trim();
+        if (!line || line.indexOf(':') < 0)
+            continue;
+        pair = line.split(':');
+        name = pair[0].trim().toLowerCase();
+        if (name === target)
+            return true;
+    }
+    return false;
+}
+
+function readGpuBusyFromSysfs() {
+    var drmDir;
+    var name;
+    var path;
+    var text;
+    var value;
+
+    try {
+        drmDir = GLib.Dir.open('/sys/class/drm', 0);
+        while ((name = drmDir.read_name()) !== null) {
+            if (!/^card[0-9]+$/.test(name))
+                continue;
+            path = '/sys/class/drm/' + name + '/device/gpu_busy_percent';
+            text = readTextFile(path);
+            if (text !== null) {
+                value = clampPercent(text.trim());
+                return { pct: value, source: path };
+            }
+        }
+    } catch (e) {
+    }
+    return null;
+}
+
+function readGpuBusyFromNvidiaSmi() {
+    var result;
+    var ok;
+    var stdout;
+    var first;
+
+    try {
+        result = GLib.spawn_command_line_sync(
+            'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits');
+        ok = result[0];
+        if (!ok)
+            return null;
+        stdout = ByteArray.toString(result[1]).trim();
+        if (!stdout)
+            return null;
+        first = stdout.split('\n')[0].trim();
+        return { pct: clampPercent(first), source: 'nvidia-smi' };
+    } catch (e) {
+        return null;
+    }
+}
+
+function QuotaHaloUsageIndicator() {
+    this._init();
+}
+
+QuotaHaloUsageIndicator.prototype = {
+    _init: function() {
+        var self = this;
+        var anchor;
+        var anchorIndex;
+        var panelBox;
+        var children;
+        var status = readStatus();
+        var copilotStatus = readCopilotStatus();
+
+        this._timeoutId = 0;
+        this._refreshTimeoutId = 0;
+        this._startupRefreshTimeoutId = 0;
+        this._openChangedId = 0;
+        this._buttonPressId = 0;
+        this._keyPressId = 0;
+        this._refreshActivatedId = 0;
+        this._refreshing = false;
+        this._copilotLabel = new St.Label({
+            text: copilotLabelText(copilotStatus),
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-copilot-label',
+        });
+        this._label = new St.Label({
+            text: panelLabelText(status),
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-usage-label',
+        });
+        this._claudeLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-claude-label',
+        });
+        this._weeklyPct = usedPercent(status, 'weekly_used_pct');
+        this._copilotPct = copilotUsedPercent(copilotStatus);
+        this._claudeWeeklyPct = claudeWeeklyUsedPercent(status);
+        this._copilotWrap = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            width: 24,
+            height: 24,
+            x_expand: false,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-copilot-ring-wrap',
+        });
+        this._copilotRing = new St.DrawingArea({
+            width: 24,
+            height: 24,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-copilot-ring',
+        });
+        this._copilotRing.connect('repaint', function(area) {
+            self._drawCopilotRing(area);
+        });
+        this._ringWrap = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            width: 26,
+            height: 26,
+            x_expand: false,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-weekly-ring-wrap',
+        });
+        this._weeklyRing = new St.DrawingArea({
+            width: 26,
+            height: 26,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-weekly-ring',
+        });
+        this._weeklyRing.connect('repaint', function(area) {
+            self._drawWeeklyRing(area);
+        });
+        this._claudeWrap = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            width: 24,
+            height: 24,
+            x_expand: false,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-claude-ring-wrap',
+        });
+        this._claudeRing = new St.DrawingArea({
+            width: 24,
+            height: 24,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-claude-ring',
+        });
+        this._claudeRing.connect('repaint', function(area) {
+            self._drawClaudeRing(area);
+        });
+        this._box = new St.BoxLayout({
+            style_class: 'panel-status-menu-box',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._box.add_style_class_name('quotahalo-usage-box');
+
+        if (GLib.file_test(COPILOT_ICON_PATH, GLib.FileTest.EXISTS)) {
+            this._copilotIcon = new St.Icon({
+                gicon: new Gio.FileIcon({ file: Gio.File.new_for_path(COPILOT_ICON_PATH) }),
+                icon_size: 20,
+                style_class: 'system-status-icon quotahalo-copilot-icon',
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+            });
+        } else {
+            this._copilotIcon = new St.Label({
+                text: 'CP',
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+                style_class: 'quotahalo-copilot-badge',
+            });
+        }
+        if (GLib.file_test(OPENAI_ICON_PATH, GLib.FileTest.EXISTS)) {
+            this._icon = new St.Icon({
+                gicon: new Gio.FileIcon({ file: Gio.File.new_for_path(OPENAI_ICON_PATH) }),
+                icon_size: 22,
+                style_class: 'system-status-icon quotahalo-usage-icon',
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+            });
+        } else {
+            this._icon = new St.Label({
+                text: 'GPT',
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+                style_class: 'quotahalo-usage-badge',
+            });
+        }
+        if (GLib.file_test(CLAUDE_ICON_PATH, GLib.FileTest.EXISTS)) {
+            this._claudeIcon = new St.Icon({
+                gicon: new Gio.FileIcon({ file: Gio.File.new_for_path(CLAUDE_ICON_PATH) }),
+                icon_size: 20,
+                style_class: 'system-status-icon quotahalo-claude-icon',
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+            });
+        } else {
+            this._claudeIcon = new St.Label({
+                text: 'C',
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+                style_class: 'quotahalo-claude-badge',
+            });
+        }
+        this._copilotWrap.add_child(this._copilotRing);
+        this._copilotWrap.add_child(this._copilotIcon);
+        this._ringWrap.add_child(this._weeklyRing);
+        this._ringWrap.add_child(this._icon);
+        this._claudeWrap.add_child(this._claudeRing);
+        this._claudeWrap.add_child(this._claudeIcon);
+        this._box.add_child(this._copilotWrap);
+        this._box.add_child(this._copilotLabel);
+        this._box.add_child(this._ringWrap);
+        this._box.add_child(this._label);
+        this._box.add_child(this._claudeWrap);
+        this._box.add_child(this._claudeLabel);
+        this._setClaudeLabel(status);
+
+        this._button = new St.Button({
+            style_class: 'panel-button',
+            button_mask: St.ButtonMask.ONE | St.ButtonMask.THREE,
+            can_focus: true,
+            reactive: true,
+            track_hover: true,
+            x_expand: false,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._button.add_style_class_name('quotahalo-usage-container');
+        this._button.set_child(this._box);
+
+        this.menu = new PopupMenu.PopupMenu(this._button, 0.0, St.Side.BOTTOM);
+        this.menu.actor.hide();
+        if (this.menu.actor.add_style_class_name)
+            this.menu.actor.add_style_class_name('quotahalo-usage-menu');
+        if (this.menu.box && this.menu.box.add_style_class_name)
+            this.menu.box.add_style_class_name('quotahalo-menu-content');
+        Main.uiGroup.add_actor(this.menu.actor);
+        this._menuManager = new PopupMenu.PopupMenuManager(this._button);
+        this._menuManager.addMenu(this.menu);
+
+        this._copilotHeader = this._addProviderHeader('Copilot', COPILOT_ICON_PATH, 'copilot');
+        this._copilotItem = this._addUsageDetailRow('AI Credits', 'copilot');
+        this._copilotUnavailableItem = this._addMessageItem('Copilot usage unavailable');
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        this._codexHeader = this._addProviderHeader('Codex', OPENAI_ICON_PATH, 'openai');
+        this._sessionItem = this._addUsageDetailRow('5h Session', 'openai');
+        this._weeklyItem = this._addUsageDetailRow('7d Usage', 'openai');
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        this._claudeHeader = this._addProviderHeader('Claude', CLAUDE_ICON_PATH, 'claude');
+        this._claudeItem = this._addUsageDetailRow('5h Session', 'claude');
+        this._claudeWeeklyItem = this._addUsageDetailRow('7d Usage', 'claude');
+        this._claudeUnavailableItem = this._addMessageItem('Claude usage unavailable');
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        this._updatedItem = this._addMetaItem('Updated', '--');
+        this._costItem = this._addMetaItem('Estimate', '--');
+        this._refreshItem = new PopupMenu.PopupMenuItem('Refresh now');
+        addItemStyle(this._refreshItem, 'quotahalo-refresh-item');
+        this.menu.addMenuItem(this._refreshItem);
+
+        this._openChangedId = this.menu.connect('open-state-changed', function(menu, open) {
+            if (open)
+                self._update();
+        });
+        this._buttonPressId = this._button.connect('button-press-event', function(actor, event) {
+            var button = event.get_button ? event.get_button() : 0;
+            if (button === 1 || button === 3) {
+                self._toggleMenu();
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+        this._keyPressId = this._button.connect('key-press-event', function(actor, event) {
+            var symbol = event.get_key_symbol ? event.get_key_symbol() : 0;
+            if (symbol === Clutter.KEY_Return || symbol === Clutter.KEY_space) {
+                self._toggleMenu();
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+        this._refreshActivatedId = this._refreshItem.connect('activate', function() {
+            if (!self._refreshing) {
+                self._requestCopilotRefresh();
+                self._requestRefresh(true);
+            }
+        });
+
+        panelBox = Main.panel._rightBox;
+        this._centerBox = Main.panel._centerBox;
+        this._rightBox = panelBox;
+        children = this._rightBox.get_children();
+        anchor = Main.panel.statusArea.dateMenu;
+        this._sibling = anchor ? (anchor.container || anchor.actor || null) : null;
+        anchorIndex = -1;
+        this._rightBox.insert_child_at_index(this._button, 0);
+
+        Main.panel.statusArea['quotahalo-usage'] = this;
+        this._writeDebug('init');
+        this._update();
+        this._startupRefreshTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, function() {
+            self._startupRefreshTimeoutId = 0;
+            self._requestRefresh(false);
+            return GLib.SOURCE_REMOVE;
+        });
+        this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 2, function() {
+            return self._update();
+        });
+        this._refreshTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, USAGE_REFRESH_SECONDS, function() {
+            self._requestRefresh(false);
+            return true;
+        });
+        GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, function() {
+            self._writeDebug('post-init');
+            return GLib.SOURCE_REMOVE;
+        });
+    },
+
+    _addInfoItem: function() {
+        var item = new PopupMenu.PopupMenuItem('', { reactive: false });
+        this.menu.addMenuItem(item);
+        return item;
+    },
+
+    _addProviderHeader: function(title, iconPath, provider) {
+        var item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'quotahalo-provider-header-item',
+        });
+        var box = new St.BoxLayout({
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-header',
+        });
+        var badge = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            width: 28,
+            height: 28,
+            x_expand: false,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-badge',
+        });
+        var labels = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-copy',
+        });
+        var titleLabel = new St.Label({
+            text: title,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-title',
+        });
+        var subtitleLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-subtitle',
+        });
+        var icon;
+
+        badge.add_style_class_name('quotahalo-provider-badge-' + provider);
+        if (GLib.file_test(iconPath, GLib.FileTest.EXISTS)) {
+            icon = new St.Icon({
+                gicon: new Gio.FileIcon({ file: Gio.File.new_for_path(iconPath) }),
+                icon_size: 19,
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+                style_class: 'quotahalo-provider-icon',
+            });
+        } else {
+            icon = new St.Label({
+                text: String(title).charAt(0),
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+                style_class: 'quotahalo-provider-letter',
+            });
+        }
+        badge.add_child(icon);
+        labels.add_child(titleLabel);
+        labels.add_child(subtitleLabel);
+        box.add_child(badge);
+        box.add_child(labels);
+        item.add_child(box);
+        this.menu.addMenuItem(item);
+        return {
+            item: item,
+            titleLabel: titleLabel,
+            subtitleLabel: subtitleLabel,
+        };
+    },
+
+    _addUsageDetailRow: function(title, provider) {
+        var item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'quotahalo-detail-row-item',
+        });
+        var outer = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            style_class: 'quotahalo-detail-row',
+        });
+        var top = new St.BoxLayout({
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-detail-row-top',
+        });
+        var titleLabel = new St.Label({
+            text: title,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-detail-title',
+        });
+        var valueLabel = new St.Label({
+            text: '--',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-detail-value',
+        });
+        var bar = new St.DrawingArea({
+            width: 252,
+            height: 11,
+            x_expand: false,
+            style_class: 'quotahalo-detail-progress',
+        });
+        var metaLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-detail-meta',
+        });
+        var row = {
+            item: item,
+            titleLabel: titleLabel,
+            valueLabel: valueLabel,
+            metaLabel: metaLabel,
+            bar: bar,
+            provider: provider,
+            pct: 0,
+        };
+
+        bar.connect('repaint', function(area) {
+            drawProgressBar(area, row.pct, provider);
+        });
+        top.add_child(titleLabel);
+        top.add_child(valueLabel);
+        outer.add_child(top);
+        outer.add_child(bar);
+        outer.add_child(metaLabel);
+        item.add_child(outer);
+        this.menu.addMenuItem(item);
+        return row;
+    },
+
+    _addMessageItem: function(text) {
+        var item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'quotahalo-message-item',
+        });
+        var label = new St.Label({
+            text: text,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-message-label',
+        });
+
+        item.add_child(label);
+        this.menu.addMenuItem(item);
+        return { item: item, label: label };
+    },
+
+    _addMetaItem: function(key, value) {
+        var item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'quotahalo-meta-item',
+        });
+        var keyLabel = new St.Label({
+            text: key,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-meta-key',
+        });
+        var valueLabel = new St.Label({
+            text: value,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-meta-value',
+        });
+
+        item.add_child(keyLabel);
+        item.add_child(valueLabel);
+        this.menu.addMenuItem(item);
+        return {
+            item: item,
+            keyLabel: keyLabel,
+            valueLabel: valueLabel,
+        };
+    },
+
+    _toggleMenu: function() {
+        this._update();
+        if (this.menu.isOpen)
+            this.menu.close();
+        else
+            this.menu.open();
+    },
+
+    _setCopilotLabel: function(status) {
+        var text = copilotLabelText(status);
+
+        this._copilotLabel.set_text(text);
+        if (text) {
+            this._copilotWrap.show();
+            this._copilotLabel.show();
+        } else {
+            this._copilotWrap.hide();
+            this._copilotLabel.hide();
+        }
+    },
+
+    _setCopilotDetails: function(status) {
+        var used;
+        var today;
+        var limit;
+        var remaining;
+        var unit;
+        var subtitle;
+
+        if (!status || status.state === 'missing') {
+            setItemVisible(this._copilotHeader.item, false);
+            setItemVisible(this._copilotItem.item, false);
+            setItemVisible(this._copilotUnavailableItem.item, false);
+            return;
+        }
+
+        setItemVisible(this._copilotHeader.item, true);
+        subtitle = (status.unit_label || 'usage') + '  ·  ' +
+            (status.source_endpoint || status.state || 'cache');
+        if (status.stale)
+            subtitle += '  ·  stale';
+        if (status.updated && status.updated !== 'Never')
+            subtitle += '  ·  ' + compactUpdatedText(status.updated);
+        this._copilotHeader.subtitleLabel.set_text(subtitle);
+
+        if (status.state === 'error' || status.pct_used === undefined || status.pct_used === null) {
+            setItemVisible(this._copilotItem.item, false);
+            setItemVisible(this._copilotUnavailableItem.item, true);
+            this._copilotUnavailableItem.label.set_text(
+                'Usage unavailable  ·  ' + (status.error || status.state));
+            return;
+        }
+
+        used = status.usage_used !== undefined ? status.usage_used : status.requests_used;
+        today = status.usage_used_today !== undefined ?
+            status.usage_used_today : status.requests_used_today;
+        limit = status.limit;
+        remaining = status.usage_remaining !== undefined ?
+            status.usage_remaining : status.remaining_requests;
+        unit = copilotUnitText(status);
+
+        setItemVisible(this._copilotItem.item, true);
+        setItemVisible(this._copilotUnavailableItem.item, false);
+        this._setPlainUsageDetailRow(
+            this._copilotItem,
+            status.pct_used,
+            String(Math.round(clampPercent(status.pct_remaining))) + '% remaining',
+            usageNumberText(used, status) + '/' + usageNumberText(limit, status) + ' ' + unit +
+            '  ·  today ' + usageNumberText(today, status) +
+            '  ·  left ' + usageNumberText(remaining, status));
+    },
+
+    _setClaudeLabel: function(status) {
+        var text = claudeLabelText(status);
+
+        this._claudeLabel.set_text(text);
+        if (text) {
+            this._claudeWrap.show();
+            this._claudeLabel.show();
+        } else {
+            this._claudeWrap.hide();
+            this._claudeLabel.hide();
+        }
+    },
+
+    _setClaudeDetails: function(status) {
+        var claude = status && status.claude ? status.claude : null;
+
+        if (!claude || !claude.available) {
+            setItemVisible(this._claudeHeader.item, false);
+            setItemVisible(this._claudeItem.item, false);
+            setItemVisible(this._claudeWeeklyItem.item, false);
+            setItemVisible(this._claudeUnavailableItem.item, false);
+            return;
+        }
+        setItemVisible(this._claudeHeader.item, true);
+        this._claudeHeader.subtitleLabel.set_text(providerSourceText(claude));
+        if (!hasClaudeQuota(claude)) {
+            setItemVisible(this._claudeItem.item, false);
+            setItemVisible(this._claudeWeeklyItem.item, false);
+            setItemVisible(this._claudeUnavailableItem.item, true);
+            this._claudeUnavailableItem.label.set_text('Usage unavailable  ·  ' + providerSourceText(claude));
+            return;
+        }
+        setItemVisible(this._claudeItem.item, true);
+        setItemVisible(this._claudeWeeklyItem.item, true);
+        setItemVisible(this._claudeUnavailableItem.item, false);
+        this._setUsageDetailRow(
+            this._claudeItem,
+            claude,
+            'session_used_pct',
+            'session_remaining_pct',
+            claude.session_reset,
+            true);
+        this._setUsageDetailRow(
+            this._claudeWeeklyItem,
+            claude,
+            'weekly_used_pct',
+            'weekly_remaining_pct',
+            claude.weekly_reset,
+            true);
+    },
+
+    _setUsageDetailRow: function(row, status, usedKey, remainingKey, resetValue, available) {
+        var remaining;
+        var meta = [];
+
+        if (!available) {
+            row.pct = 0;
+            row.valueLabel.set_text('--');
+            row.metaLabel.set_text('Usage unavailable');
+            if (row.bar.queue_repaint)
+                row.bar.queue_repaint();
+            return;
+        }
+
+        row.pct = usedPercent(status, usedKey);
+        row.valueLabel.set_text(String(Math.round(row.pct)) + '%');
+        remaining = remainingPercent(status, usedKey, remainingKey);
+        if (remaining !== null)
+            meta.push(String(remaining) + '% remaining');
+        meta.push('resets ' + resetTextFor(status, usedKey, resetValue));
+        row.metaLabel.set_text(meta.join('  ·  '));
+        if (row.bar.queue_repaint)
+            row.bar.queue_repaint();
+    },
+
+    _setPlainUsageDetailRow: function(row, pct, remainingText, metaText) {
+        row.pct = clampPercent(pct);
+        row.valueLabel.set_text(String(Math.round(row.pct)) + '%');
+        row.metaLabel.set_text(remainingText + '  ·  ' + metaText);
+        if (row.bar.queue_repaint)
+            row.bar.queue_repaint();
+    },
+
+    _drawCopilotRing: function(area) {
+        this._drawUsageRing(area, this._copilotPct, 'copilot');
+    },
+
+    _drawWeeklyRing: function(area) {
+        this._drawUsageRing(area, this._weeklyPct, 'openai');
+    },
+
+    _drawClaudeRing: function(area) {
+        this._drawUsageRing(area, this._claudeWeeklyPct, 'claude');
+    },
+
+    _drawUsageRing: function(area, pctValue, provider) {
+        var alloc = area.get_allocation_box();
+        var width = alloc.x2 - alloc.x1;
+        var height = alloc.y2 - alloc.y1;
+        var size = Math.min(width, height);
+        var radius = Math.max(1, size / 2 - 1.8);
+        var cx = width / 2;
+        var cy = height / 2;
+        var pct = clampPercent(pctValue);
+        var color = usageRingColor(pct, provider);
+        var cr = area.get_context();
+
+        cr.setLineWidth(2.0);
+        cr.setLineCap(Cairo.LineCap.ROUND);
+
+        cr.setSourceRGBA(1.0, 1.0, 1.0, 0.18);
+        cr.arc(cx, cy, radius, 0, Math.PI * 2);
+        cr.stroke();
+
+        if (pct > 0) {
+            cr.setSourceRGBA(color[0], color[1], color[2], color[3]);
+            cr.arc(
+                cx,
+                cy,
+                radius,
+                -Math.PI / 2,
+                -Math.PI / 2 + Math.PI * 2 * pct / 100);
+            cr.stroke();
+        }
+
+        cr.$dispose();
+    },
+
+    _writeDebug: function(reason) {
+        var parent = this._button.get_parent ? this._button.get_parent() : null;
+        var leftSiblings = Main.panel._leftBox && Main.panel._leftBox.get_children ?
+            Main.panel._leftBox.get_children() : [];
+        var siblings = this._centerBox && this._centerBox.get_children ? this._centerBox.get_children() : [];
+        var rightSiblings = Main.panel._rightBox && Main.panel._rightBox.get_children ?
+            Main.panel._rightBox.get_children() : [];
+        writeDebug({
+            reason: reason,
+            button: actorSummary(this._button),
+            buttonParent: actorSummary(parent),
+            leftBox: actorSummary(Main.panel._leftBox),
+            centerBox: actorSummary(Main.panel._centerBox),
+            rightBox: actorSummary(Main.panel._rightBox),
+            sibling: actorSummary(this._sibling),
+            leftChildren: leftSiblings.map(actorSummary),
+            centerChildren: siblings.map(actorSummary),
+            rightChildren: rightSiblings.map(actorSummary),
+        });
+    },
+
+    _requestRefresh: function(manual) {
+        var self = this;
+        var proc;
+        var startedAt = new Date().toISOString();
+
+        manual = manual !== false;
+        if (this._refreshing)
+            return;
+
+        this._refreshing = true;
+        writeRefreshDebug({
+            state: 'started',
+            manual: manual,
+            startedAt: startedAt,
+            command: [PYTHON_PATH, SCRIPT_PATH, '--refresh-once'],
+        });
+        if (manual && this._refreshItem.setSensitive)
+            this._refreshItem.setSensitive(false);
+        if (manual)
+            this._refreshItem.label.set_text('Refreshing...');
+
+        try {
+            proc = Gio.Subprocess.new(
+                [PYTHON_PATH, SCRIPT_PATH, '--refresh-once'],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+            proc.communicate_utf8_async(null, null, function(subprocess, res) {
+                var ok = false;
+                var stdout = '';
+                var stderr = '';
+                var errorText = null;
+                try {
+                    var result = subprocess.communicate_utf8_finish(res);
+                    ok = result[0] && subprocess.get_successful();
+                    stdout = result[1] || '';
+                    stderr = result[2] || '';
+                } catch (e) {
+                    errorText = String(e);
+                    log('quotahalo-usage refresh failed: ' + e);
+                }
+                writeRefreshDebug({
+                    state: ok ? 'finished' : 'failed',
+                    manual: manual,
+                    startedAt: startedAt,
+                    finishedAt: new Date().toISOString(),
+                    successful: ok,
+                    exitStatus: subprocess.get_exit_status ? subprocess.get_exit_status() : null,
+                    error: errorText,
+                    stdoutTail: stdout.slice(-4000),
+                    stderrTail: stderr.slice(-4000),
+                });
+                self._refreshing = false;
+                if (manual && self._refreshItem.setSensitive)
+                    self._refreshItem.setSensitive(true);
+                if (manual)
+                    self._refreshItem.label.set_text('Refresh now');
+                self._update();
+            });
+        } catch (e) {
+            log('quotahalo-usage refresh spawn failed: ' + e);
+            writeRefreshDebug({
+                state: 'spawn-failed',
+                manual: manual,
+                startedAt: startedAt,
+                finishedAt: new Date().toISOString(),
+                error: String(e),
+            });
+            this._refreshing = false;
+            if (manual && this._refreshItem.setSensitive)
+                this._refreshItem.setSensitive(true);
+            if (manual)
+                this._refreshItem.label.set_text('Refresh now');
+        }
+    },
+
+    _requestCopilotRefresh: function() {
+        var proc;
+
+        try {
+            proc = Gio.Subprocess.new(
+                [PYTHON_PATH, COPILOT_SCRIPT_PATH, '--once'],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+            proc.communicate_utf8_async(null, null, function(subprocess, res) {
+                try {
+                    subprocess.communicate_utf8_finish(res);
+                } catch (e) {
+                    log('quotahalo copilot refresh failed: ' + e);
+                }
+            });
+        } catch (e) {
+            log('quotahalo copilot refresh spawn failed: ' + e);
+        }
+    },
+
+    _update: function() {
+        var status = readStatus();
+        var copilotStatus = readCopilotStatus();
+        var today;
+        var total;
+        var hasCodexUsage;
+
+        this._setCopilotLabel(copilotStatus);
+        this._label.set_text(panelLabelText(status));
+        this._setClaudeLabel(status);
+        this._copilotPct = copilotUsedPercent(copilotStatus);
+        this._weeklyPct = usedPercent(status, 'weekly_used_pct');
+        this._claudeWeeklyPct = claudeWeeklyUsedPercent(status);
+        if (this._copilotRing.queue_repaint)
+            this._copilotRing.queue_repaint();
+        if (this._weeklyRing.queue_repaint)
+            this._weeklyRing.queue_repaint();
+        if (this._claudeRing.queue_repaint)
+            this._claudeRing.queue_repaint();
+
+        this._setCopilotDetails(copilotStatus);
+        hasCodexUsage = status && status.source !== 'none' && status.source !== 'config';
+        this._codexHeader.subtitleLabel.set_text(providerSourceText(status));
+        this._setUsageDetailRow(
+            this._sessionItem,
+            status,
+            'session_used_pct',
+            'session_remaining_pct',
+            status.session_reset,
+            hasCodexUsage);
+        this._setUsageDetailRow(
+            this._weeklyItem,
+            status,
+            'weekly_used_pct',
+            'weekly_remaining_pct',
+            status.weekly_reset,
+            hasCodexUsage);
+        this._setClaudeDetails(status);
+
+        this._updatedItem.valueLabel.set_text(compactUpdatedText(status.updated));
+        if (!this._refreshing)
+            this._refreshItem.label.set_text('Refresh now');
+
+        today = status.cost_today !== undefined ? status.cost_today : 0;
+        total = status.cost_30d !== undefined ? status.cost_30d : 0;
+        this._costItem.valueLabel.set_text(
+            '$' + Number(today).toFixed(2) + ' today  ·  $' + Number(total).toFixed(2) + ' all');
+        return true;
+    },
+
+    destroy: function() {
+        if (Main.panel.statusArea['quotahalo-usage'] === this)
+            delete Main.panel.statusArea['quotahalo-usage'];
+        if (this._refreshActivatedId) {
+            this._refreshItem.disconnect(this._refreshActivatedId);
+            this._refreshActivatedId = 0;
+        }
+        if (this._keyPressId) {
+            this._button.disconnect(this._keyPressId);
+            this._keyPressId = 0;
+        }
+        if (this._buttonPressId) {
+            this._button.disconnect(this._buttonPressId);
+            this._buttonPressId = 0;
+        }
+        if (this._openChangedId) {
+            this.menu.disconnect(this._openChangedId);
+            this._openChangedId = 0;
+        }
+        if (this._timeoutId) {
+            GLib.Source.remove(this._timeoutId);
+            this._timeoutId = 0;
+        }
+        if (this._refreshTimeoutId) {
+            GLib.Source.remove(this._refreshTimeoutId);
+            this._refreshTimeoutId = 0;
+        }
+        if (this._startupRefreshTimeoutId) {
+            GLib.Source.remove(this._startupRefreshTimeoutId);
+            this._startupRefreshTimeoutId = 0;
+        }
+        if (this.menu) {
+            this.menu.destroy();
+            this.menu = null;
+        }
+        this._button.destroy();
+    },
+};
+
+function QuotaHaloSystemIndicator() {
+    this._init();
+}
+
+QuotaHaloSystemIndicator.prototype = {
+    _init: function() {
+        var self = this;
+        var children;
+
+        this._timeoutId = 0;
+        this._flclashTimeoutId = 0;
+        this._buttonPressId = 0;
+        this._keyPressId = 0;
+        this._openChangedId = 0;
+        this._prevCpu = null;
+        this._prevNet = null;
+        this._gpuCache = { pct: 0, source: 'unknown', at: 0 };
+        this._ifaces = [];
+        this._flclashInfo = null;
+        this._flclashError = null;
+        this._flclashInfoLoading = false;
+        this._flclashAvailable = hasNetworkInterface(FLCLASH_INTERFACE_NAME);
+        this._lastNet = null;
+
+        this._box = new St.BoxLayout({
+            style_class: 'quotahalo-system-box',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+
+        this._cpuValue = this._addSegment('CPU');
+        this._memValue = this._addSegment('MEM');
+        this._gpuValue = this._addSegment('GPU');
+        this._netValue = new St.Label({
+            text: '↓0B ↑0B',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-system-net',
+        });
+        this._box.add_child(this._netValue);
+
+        this._button = new St.Button({
+            style_class: 'panel-button quotahalo-system-container',
+            button_mask: St.ButtonMask.ONE | St.ButtonMask.THREE,
+            can_focus: true,
+            reactive: true,
+            track_hover: true,
+            x_expand: false,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._button.set_child(this._box);
+
+        this.menu = new PopupMenu.PopupMenu(this._button, 0.0, St.Side.BOTTOM);
+        this.menu.actor.hide();
+        if (this.menu.actor.add_style_class_name)
+            this.menu.actor.add_style_class_name('quotahalo-system-menu');
+        if (this.menu.box && this.menu.box.add_style_class_name)
+            this.menu.box.add_style_class_name('quotahalo-menu-content');
+        Main.uiGroup.add_actor(this.menu.actor);
+        this._menuManager = new PopupMenu.PopupMenuManager(this._button);
+        this._menuManager.addMenu(this.menu);
+
+        this._systemHeader = this._addSystemHeader();
+        this._cpuItem = this._addMetricDetailRow('CPU', 'openai');
+        this._memItem = this._addMetricDetailRow('Memory', 'openai');
+        this._gpuItem = this._addMetricDetailRow('GPU', 'openai');
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._netItem = this._addSystemMetaItem('Network', '--');
+        this._ifaceItem = this._addSystemMetaItem('Interfaces', '--');
+        this._flclashSeparator = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._flclashSeparator);
+        this._flclashIpItem = this._addSystemMetaItem('FlClash IP', '--');
+        this._flclashLocationItem = this._addSystemMetaItem('Location', '--');
+        this._flclashOrgItem = this._addSystemMetaItem('Org', '--');
+        this._flclashHostItem = this._addSystemMetaItem('Host', '--');
+        this._flclashTzItem = this._addSystemMetaItem('Timezone', '--');
+        this._renderFlClashInfo();
+
+        this._openChangedId = this.menu.connect('open-state-changed', function(menu, open) {
+            if (open) {
+                self._update();
+                self._loadFlClashInfo(false);
+            }
+        });
+        this._buttonPressId = this._button.connect('button-press-event', function(actor, event) {
+            var button = event.get_button ? event.get_button() : 0;
+            if (button === 1 || button === 3) {
+                self._toggleMenu();
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+        this._keyPressId = this._button.connect('key-press-event', function(actor, event) {
+            var symbol = event.get_key_symbol ? event.get_key_symbol() : 0;
+            if (symbol === Clutter.KEY_Return || symbol === Clutter.KEY_space) {
+                self._toggleMenu();
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+
+        this._leftBox = Main.panel._leftBox;
+        children = this._leftBox.get_children();
+        this._leftBox.insert_child_at_index(this._button, children.length);
+
+        Main.panel.statusArea['quotahalo-system'] = this;
+        this._update();
+        this._loadFlClashInfo(true);
+        this._timeoutId = GLib.timeout_add_seconds(
+            GLib.PRIORITY_DEFAULT,
+            SYSTEM_UPDATE_SECONDS,
+            function() {
+                return self._update();
+            });
+        this._flclashTimeoutId = GLib.timeout_add_seconds(
+            GLib.PRIORITY_DEFAULT,
+            FLCLASH_UPDATE_SECONDS,
+            function() {
+                self._loadFlClashInfo(false);
+                return true;
+            });
+    },
+
+    _addSegment: function(key) {
+        var box = new St.BoxLayout({
+            style_class: 'quotahalo-system-segment',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        var keyLabel = new St.Label({
+            text: key,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-system-key',
+        });
+        var valueLabel = new St.Label({
+            text: '--%',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-system-value',
+        });
+        box.add_child(keyLabel);
+        box.add_child(valueLabel);
+        this._box.add_child(box);
+        return valueLabel;
+    },
+
+    _addSystemHeader: function() {
+        var item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'quotahalo-provider-header-item',
+        });
+        var box = new St.BoxLayout({
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-header',
+        });
+        var badge = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            width: 28,
+            height: 28,
+            x_expand: false,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-badge',
+        });
+        var icon = new St.Icon({
+            icon_name: 'utilities-system-monitor-symbolic',
+            icon_size: 17,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-icon',
+        });
+        var labels = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-copy',
+        });
+        var titleLabel = new St.Label({
+            text: 'System',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-title',
+        });
+        var subtitleLabel = new St.Label({
+            text: 'Live every ' + String(SYSTEM_UPDATE_SECONDS) + 's',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-subtitle',
+        });
+
+        badge.add_style_class_name('quotahalo-system-badge');
+        badge.add_child(icon);
+        labels.add_child(titleLabel);
+        labels.add_child(subtitleLabel);
+        box.add_child(badge);
+        box.add_child(labels);
+        item.add_child(box);
+        this.menu.addMenuItem(item);
+        return {
+            item: item,
+            subtitleLabel: subtitleLabel,
+        };
+    },
+
+    _addMetricDetailRow: function(title, provider) {
+        var item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'quotahalo-detail-row-item',
+        });
+        var outer = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            style_class: 'quotahalo-detail-row',
+        });
+        var top = new St.BoxLayout({
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-detail-row-top',
+        });
+        var titleLabel = new St.Label({
+            text: title,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-detail-title',
+        });
+        var valueLabel = new St.Label({
+            text: '--',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-detail-value',
+        });
+        var bar = new St.DrawingArea({
+            width: 252,
+            height: 11,
+            x_expand: false,
+            style_class: 'quotahalo-detail-progress',
+        });
+        var metaLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-detail-meta',
+        });
+        var row = {
+            item: item,
+            valueLabel: valueLabel,
+            metaLabel: metaLabel,
+            bar: bar,
+            provider: provider,
+            pct: 0,
+        };
+
+        bar.connect('repaint', function(area) {
+            drawProgressBar(area, row.pct, provider);
+        });
+        top.add_child(titleLabel);
+        top.add_child(valueLabel);
+        outer.add_child(top);
+        outer.add_child(bar);
+        outer.add_child(metaLabel);
+        item.add_child(outer);
+        this.menu.addMenuItem(item);
+        return row;
+    },
+
+    _addSystemMetaItem: function(key, value) {
+        var item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'quotahalo-meta-item',
+        });
+        var keyLabel = new St.Label({
+            text: key,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-meta-key',
+        });
+        var valueLabel = new St.Label({
+            text: value,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-meta-value',
+        });
+
+        item.add_child(keyLabel);
+        item.add_child(valueLabel);
+        this.menu.addMenuItem(item);
+        return {
+            item: item,
+            keyLabel: keyLabel,
+            valueLabel: valueLabel,
+        };
+    },
+
+    _setMetricDetailRow: function(row, pct, valueText, metaText) {
+        row.pct = clampPercent(pct);
+        row.valueLabel.set_text(valueText);
+        row.metaLabel.set_text(metaText);
+        if (row.bar.queue_repaint)
+            row.bar.queue_repaint();
+    },
+
+    _addInfoItem: function() {
+        var item = new PopupMenu.PopupMenuItem('', { reactive: false });
+        this.menu.addMenuItem(item);
+        return item;
+    },
+
+    _toggleMenu: function() {
+        this._update();
+        if (this.menu.isOpen)
+            this.menu.close();
+        else {
+            this.menu.open();
+            this._loadFlClashInfo(false);
+        }
+    },
+
+    _readCpuPercent: function() {
+        var current = readCpuSnapshot();
+        var prev = this._prevCpu;
+        var totalDelta;
+        var idleDelta;
+        var pct = 0;
+
+        this._prevCpu = current;
+        if (!current || !prev)
+            return 0;
+        totalDelta = current.total - prev.total;
+        idleDelta = current.idle - prev.idle;
+        if (totalDelta <= 0)
+            return 0;
+        pct = (totalDelta - idleDelta) * 100 / totalDelta;
+        return pct;
+    },
+
+    _readNetworkRates: function() {
+        var current = readNetSnapshot();
+        var prev = this._prevNet;
+        var now = GLib.get_monotonic_time();
+        var seconds;
+        var rxRate = 0;
+        var txRate = 0;
+
+        this._prevNet = {
+            rx: current.rx,
+            tx: current.tx,
+            names: current.names,
+            at: now,
+        };
+        this._ifaces = current.names;
+        if (!prev)
+            return { rxRate: 0, txRate: 0 };
+        seconds = Math.max(0.001, (now - prev.at) / 1000000);
+        rxRate = Math.max(0, (current.rx - prev.rx) / seconds);
+        txRate = Math.max(0, (current.tx - prev.tx) / seconds);
+        return { rxRate: rxRate, txRate: txRate };
+    },
+
+    _readGpuPercent: function() {
+        var now = GLib.get_monotonic_time();
+        var gpu;
+
+        if (this._gpuCache.at && now - this._gpuCache.at < GPU_CACHE_USEC)
+            return this._gpuCache;
+        gpu = readGpuBusyFromSysfs() || readGpuBusyFromNvidiaSmi() || {
+            pct: 0,
+            source: 'unavailable',
+        };
+        gpu.at = now;
+        this._gpuCache = gpu;
+        return gpu;
+    },
+
+    _locationText: function(info) {
+        var parts = [];
+
+        if (!info)
+            return '--';
+        if (info.city)
+            parts.push(info.city);
+        if (info.region)
+            parts.push(info.region);
+        if (info.country)
+            parts.push(info.country);
+        if (info.loc)
+            parts.push(info.loc);
+        return parts.length ? parts.join(', ') : '--';
+    },
+
+    _countryCode: function() {
+        var info = this._flclashInfo;
+        var code;
+
+        if (!info || !info.country)
+            return '--';
+        code = String(info.country).trim().toUpperCase();
+        if (!code.match(/^[A-Z][A-Z]$/))
+            return '--';
+        return code;
+    },
+
+    _countryFlag: function(code) {
+        var base = 0x1F1E6;
+
+        if (!code || code === '--')
+            return '';
+        try {
+            return String.fromCodePoint(
+                base + code.charCodeAt(0) - 65,
+                base + code.charCodeAt(1) - 65);
+        } catch (e) {
+            return '';
+        }
+    },
+
+    _flclashBadgeText: function() {
+        var code = this._countryCode();
+        var flag = this._countryFlag(code);
+
+        if (code === '--')
+            return '--';
+        return (flag ? flag + ' ' : '') + code;
+    },
+
+    _setFlClashItemsVisible: function(visible) {
+        var items = [
+            this._flclashSeparator,
+            this._flclashIpItem,
+            this._flclashLocationItem,
+            this._flclashOrgItem,
+            this._flclashHostItem,
+            this._flclashTzItem,
+        ];
+        var i;
+
+        for (i = 0; i < items.length; i++) {
+            if (!items[i])
+                continue;
+            if (items[i].item)
+                setItemVisible(items[i].item, visible);
+            else
+                setItemVisible(items[i], visible);
+        }
+    },
+
+    _detectFlClash: function() {
+        var available = hasNetworkInterface(FLCLASH_INTERFACE_NAME);
+
+        if (available === this._flclashAvailable)
+            return available;
+        this._flclashAvailable = available;
+        if (!available) {
+            this._flclashInfo = null;
+            this._flclashError = null;
+            this._flclashInfoLoading = false;
+        }
+        this._renderFlClashInfo();
+        return available;
+    },
+
+    _updateNetworkLabel: function(net) {
+        var badge = this._flclashAvailable ? this._flclashBadgeText() : '';
+        var prefix;
+
+        net = net || this._lastNet || { rxRate: 0, txRate: 0 };
+        if (badge === '--')
+            badge = '';
+        prefix = badge ? badge + ' ' : '';
+        this._netValue.set_text(
+            prefix +
+            '↓' + formatRate(net.rxRate) +
+            ' ↑' + formatRate(net.txRate));
+    },
+
+    _renderFlClashInfo: function() {
+        var info = this._flclashInfo;
+
+        if (!this._flclashAvailable) {
+            this._setFlClashItemsVisible(false);
+            this._updateNetworkLabel();
+            return;
+        }
+        this._setFlClashItemsVisible(true);
+        this._updateNetworkLabel();
+        if (this._flclashInfoLoading) {
+            this._flclashIpItem.valueLabel.set_text('loading ipinfo.io...');
+            this._flclashLocationItem.valueLabel.set_text('Proxy ' + FLCLASH_PROXY_URL);
+            this._flclashOrgItem.valueLabel.set_text('--');
+            this._flclashHostItem.valueLabel.set_text('--');
+            this._flclashTzItem.valueLabel.set_text('--');
+            return;
+        }
+        if (this._flclashError) {
+            this._flclashIpItem.valueLabel.set_text('unavailable');
+            this._flclashLocationItem.valueLabel.set_text('Proxy ' + FLCLASH_PROXY_URL);
+            this._flclashOrgItem.valueLabel.set_text(String(this._flclashError));
+            this._flclashHostItem.valueLabel.set_text('--');
+            this._flclashTzItem.valueLabel.set_text('--');
+            return;
+        }
+        if (!info) {
+            this._flclashIpItem.valueLabel.set_text('click to load');
+            this._flclashLocationItem.valueLabel.set_text('Proxy ' + FLCLASH_PROXY_URL);
+            this._flclashOrgItem.valueLabel.set_text('--');
+            this._flclashHostItem.valueLabel.set_text('--');
+            this._flclashTzItem.valueLabel.set_text('--');
+            return;
+        }
+
+        this._flclashIpItem.valueLabel.set_text(info.ip || '--');
+        this._flclashLocationItem.valueLabel.set_text(this._locationText(info));
+        this._flclashOrgItem.valueLabel.set_text(info.org || '--');
+        this._flclashHostItem.valueLabel.set_text(info.hostname || '--');
+        this._flclashTzItem.valueLabel.set_text(info.timezone || '--');
+    },
+
+    _loadFlClashInfo: function(showLoading) {
+        var self = this;
+        var proc;
+
+        if (!this._detectFlClash())
+            return;
+        if (this._flclashInfoLoading)
+            return;
+        this._flclashInfoLoading = true;
+        this._flclashError = null;
+        if (showLoading || !this._flclashInfo)
+            this._renderFlClashInfo();
+
+        try {
+            proc = Gio.Subprocess.new(
+                [
+                    '/usr/bin/curl',
+                    '-sS',
+                    '--max-time',
+                    '8',
+                    '--proxy',
+                    FLCLASH_PROXY_URL,
+                    FLCLASH_IPINFO_URL,
+                ],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+            proc.communicate_utf8_async(null, null, function(subprocess, res) {
+                var result;
+                var ok;
+                var stdout;
+                var stderr;
+                var nextInfo;
+                var currentIp;
+                var nextIp;
+
+                try {
+                    result = subprocess.communicate_utf8_finish(res);
+                    ok = result[0];
+                    stdout = result[1] || '';
+                    stderr = result[2] || '';
+                    if (!hasNetworkInterface(FLCLASH_INTERFACE_NAME)) {
+                        self._flclashAvailable = false;
+                        self._flclashInfo = null;
+                        self._flclashError = null;
+                        self._flclashInfoLoading = false;
+                        self._renderFlClashInfo();
+                        return;
+                    }
+                    if (!ok || !subprocess.get_successful())
+                        throw new Error(stderr || 'curl failed');
+                    nextInfo = JSON.parse(stdout);
+                    currentIp = self._flclashInfo && self._flclashInfo.ip ?
+                        String(self._flclashInfo.ip) : '';
+                    nextIp = nextInfo && nextInfo.ip ? String(nextInfo.ip) : '';
+                    if (!nextIp)
+                        throw new Error('ipinfo response missing ip');
+                    if (nextIp !== currentIp) {
+                        self._flclashInfo = nextInfo;
+                        self._flclashInfoLoading = false;
+                        self._flclashError = null;
+                        self._renderFlClashInfo();
+                        return;
+                    }
+                    self._flclashError = null;
+                } catch (e) {
+                    if (!self._flclashInfo)
+                        self._flclashError = String(e);
+                }
+                self._flclashInfoLoading = false;
+                if (!self._flclashInfo)
+                    self._renderFlClashInfo();
+            });
+        } catch (e) {
+            this._flclashInfoLoading = false;
+            if (!this._flclashInfo) {
+                this._flclashError = String(e);
+                this._renderFlClashInfo();
+            }
+        }
+    },
+
+    _update: function() {
+        var cpu = this._readCpuPercent();
+        var mem = readMemory();
+        var gpu = this._readGpuPercent();
+        var net = this._readNetworkRates();
+        var badge;
+
+        this._detectFlClash();
+        this._cpuValue.set_text(pctText(cpu));
+        this._memValue.set_text(pctText(mem.pct));
+        this._gpuValue.set_text(gpu.source === 'unavailable' ? unavailablePctText() : pctText(gpu.pct));
+        this._lastNet = net;
+        this._updateNetworkLabel(net);
+
+        badge = this._flclashAvailable ? this._flclashBadgeText() : '';
+        if (badge === '--')
+            badge = '';
+        this._systemHeader.subtitleLabel.set_text(
+            'Live every ' + String(SYSTEM_UPDATE_SECONDS) + 's' +
+            (badge ? '  ·  ' + badge : ''));
+        this._setMetricDetailRow(
+            this._cpuItem,
+            cpu,
+            String(Math.round(clampPercent(cpu))) + '%',
+            'Current processor load');
+        this._setMetricDetailRow(
+            this._memItem,
+            mem.pct,
+            String(Math.round(clampPercent(mem.pct))) + '%',
+            formatBytes(mem.used) + ' / ' + formatBytes(mem.total));
+        this._setMetricDetailRow(
+            this._gpuItem,
+            gpu.source === 'unavailable' ? 0 : gpu.pct,
+            gpu.source === 'unavailable' ? '--' : String(Math.round(clampPercent(gpu.pct))) + '%',
+            gpu.source === 'unavailable' ? 'Unavailable' : gpu.source);
+        this._netItem.valueLabel.set_text(
+            '↓ ' + formatRate(net.rxRate) + '/s   ↑ ' + formatRate(net.txRate) + '/s');
+        this._ifaceItem.valueLabel.set_text(
+            this._ifaces.length ? this._ifaces.join(', ') : 'none');
+        return true;
+    },
+
+    destroy: function() {
+        if (Main.panel.statusArea['quotahalo-system'] === this)
+            delete Main.panel.statusArea['quotahalo-system'];
+        if (this._keyPressId) {
+            this._button.disconnect(this._keyPressId);
+            this._keyPressId = 0;
+        }
+        if (this._buttonPressId) {
+            this._button.disconnect(this._buttonPressId);
+            this._buttonPressId = 0;
+        }
+        if (this._openChangedId) {
+            this.menu.disconnect(this._openChangedId);
+            this._openChangedId = 0;
+        }
+        if (this._timeoutId) {
+            GLib.Source.remove(this._timeoutId);
+            this._timeoutId = 0;
+        }
+        if (this._flclashTimeoutId) {
+            GLib.Source.remove(this._flclashTimeoutId);
+            this._flclashTimeoutId = 0;
+        }
+        if (this.menu) {
+            this.menu.destroy();
+            this.menu = null;
+        }
+        this._button.destroy();
+    },
+};
+
+function init() {
+}
+
+function enable() {
+    usageIndicator = new QuotaHaloUsageIndicator();
+    try {
+        systemIndicator = new QuotaHaloSystemIndicator();
+    } catch (e) {
+        systemIndicator = null;
+        log('quotahalo-system failed: ' + e);
+    }
+}
+
+function disable() {
+    if (systemIndicator) {
+        systemIndicator.destroy();
+        systemIndicator = null;
+    }
+    if (usageIndicator) {
+        usageIndicator.destroy();
+        usageIndicator = null;
+    }
+}

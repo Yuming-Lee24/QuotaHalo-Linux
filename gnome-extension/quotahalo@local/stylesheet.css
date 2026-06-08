@@ -1,0 +1,279 @@
+.quotahalo-usage-container {
+  -natural-hpadding: 7px;
+  -minimum-hpadding: 5px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.96);
+  font-weight: 600;
+}
+
+.quotahalo-usage-container:hover,
+.quotahalo-system-container:hover {
+  background-color: rgba(255, 255, 255, 0.10);
+}
+
+.quotahalo-usage-box {
+  spacing: 5px;
+}
+
+.quotahalo-usage-label,
+.quotahalo-copilot-label,
+.quotahalo-claude-label {
+  min-width: 34px;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: right;
+}
+
+.quotahalo-claude-label {
+  color: rgba(255, 255, 255, 0.90);
+}
+
+.quotahalo-copilot-label {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.quotahalo-copilot-ring-wrap {
+  margin-right: 2px;
+}
+
+.quotahalo-copilot-ring {
+  icon-size: 24px;
+}
+
+.quotahalo-copilot-icon {
+  icon-size: 20px;
+}
+
+.quotahalo-weekly-ring-wrap {
+  margin-left: 7px;
+  margin-right: 2px;
+}
+
+.quotahalo-weekly-ring {
+  icon-size: 26px;
+}
+
+.quotahalo-usage-icon {
+  icon-size: 22px;
+}
+
+.quotahalo-claude-ring-wrap {
+  margin-left: 7px;
+  margin-right: 2px;
+}
+
+.quotahalo-claude-ring {
+  icon-size: 24px;
+}
+
+.quotahalo-claude-icon {
+  icon-size: 20px;
+}
+
+.quotahalo-usage-badge,
+.quotahalo-copilot-badge,
+.quotahalo-claude-badge {
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.quotahalo-usage-menu {
+  min-width: 316px;
+}
+
+.quotahalo-system-menu {
+  min-width: 316px;
+}
+
+.quotahalo-usage-menu .popup-menu-content,
+.quotahalo-system-menu .popup-menu-content,
+.quotahalo-menu-content {
+  background-color: rgba(23, 25, 28, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+  color: rgba(244, 247, 250, 0.96);
+  padding: 8px 0;
+}
+
+.quotahalo-usage-menu .popup-menu-item,
+.quotahalo-system-menu .popup-menu-item,
+.quotahalo-provider-header-item,
+.quotahalo-detail-row-item,
+.quotahalo-message-item,
+.quotahalo-meta-item {
+  color: rgba(244, 247, 250, 0.96);
+}
+
+.quotahalo-usage-menu .popup-separator-menu-item,
+.quotahalo-system-menu .popup-separator-menu-item {
+  color: rgba(255, 255, 255, 0.16);
+}
+
+.quotahalo-provider-header-item {
+  padding: 11px 14px 7px;
+}
+
+.quotahalo-provider-header {
+  spacing: 10px;
+}
+
+.quotahalo-provider-copy {
+  spacing: 2px;
+}
+
+.quotahalo-provider-badge {
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.quotahalo-provider-badge-openai {
+  background-color: rgba(15, 118, 110, 0.28);
+  border-color: rgba(45, 212, 191, 0.30);
+}
+
+.quotahalo-provider-badge-copilot {
+  background-color: rgba(37, 99, 235, 0.24);
+  border-color: rgba(96, 165, 250, 0.32);
+}
+
+.quotahalo-provider-badge-claude {
+  background-color: rgba(154, 83, 62, 0.30);
+  border-color: rgba(251, 146, 60, 0.28);
+}
+
+.quotahalo-system-badge {
+  background-color: rgba(37, 99, 235, 0.22);
+  border-color: rgba(96, 165, 250, 0.30);
+}
+
+.quotahalo-provider-title {
+  color: rgba(248, 250, 252, 0.98);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.quotahalo-provider-subtitle {
+  color: rgba(203, 213, 225, 0.70);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.quotahalo-provider-icon {
+  icon-size: 19px;
+}
+
+.quotahalo-provider-letter {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.quotahalo-detail-row-item {
+  padding: 6px 14px 8px;
+}
+
+.quotahalo-detail-row {
+  spacing: 5px;
+}
+
+.quotahalo-detail-row-top {
+  spacing: 12px;
+}
+
+.quotahalo-detail-title {
+  color: rgba(226, 232, 240, 0.88);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.quotahalo-detail-value {
+  min-width: 40px;
+  color: rgba(248, 250, 252, 0.98);
+  font-size: 15px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.quotahalo-detail-meta {
+  color: rgba(148, 163, 184, 0.92);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.quotahalo-message-item {
+  padding: 8px 14px 10px;
+}
+
+.quotahalo-message-label {
+  color: rgba(203, 213, 225, 0.82);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.quotahalo-meta-item {
+  padding: 5px 14px;
+}
+
+.quotahalo-meta-key {
+  color: rgba(148, 163, 184, 0.92);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.quotahalo-meta-value {
+  color: rgba(226, 232, 240, 0.94);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+}
+
+.quotahalo-refresh-item {
+  margin: 6px 8px 8px;
+  border-radius: 8px;
+  color: rgba(94, 234, 212, 0.98);
+  font-weight: 600;
+}
+
+.quotahalo-refresh-item:hover {
+  background-color: rgba(45, 212, 191, 0.14);
+}
+
+.quotahalo-system-container {
+  -natural-hpadding: 8px;
+  -minimum-hpadding: 6px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.quotahalo-system-box {
+  spacing: 8px;
+}
+
+.quotahalo-system-segment {
+  spacing: 3px;
+}
+
+.quotahalo-system-key {
+  color: rgba(255, 255, 255, 0.54);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.quotahalo-system-value {
+  min-width: 36px;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.quotahalo-system-net {
+  min-width: 118px;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 14px;
+  font-weight: 600;
+}

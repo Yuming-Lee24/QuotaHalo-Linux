@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh QuotaHalo usage cache
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO_DIR@
+ExecStart=/usr/bin/python3 @REPO_DIR@/quota_halo_status.py --refresh-once
