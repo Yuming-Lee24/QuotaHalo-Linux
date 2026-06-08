@@ -526,9 +526,11 @@ class ClaudeDataFetcher:
                 d = self._empty()
                 d["plan"] = plan_local
                 d["source"] = "credentials"
+                d["error"] = "OAuth usage API skipped during recent failure backoff"
                 d["installed"] = True
                 return d
 
+            last_error = None
             try:
                 req = Request(
                     "https://api.anthropic.com/api/oauth/usage",
@@ -550,15 +552,18 @@ class ClaudeDataFetcher:
                 except Exception:
                     pass
                 message = f"HTTP {e.code} {body}"
+                last_error = message
                 self._record_oauth_failure(message)
                 print(f"    OAuth usage API err: {message}", flush=True)
             except Exception as e:
+                last_error = str(e)
                 self._record_oauth_failure(e)
                 print(f"    OAuth usage API err: {e}", flush=True)
 
             d = self._empty()
             d["plan"] = plan_local
             d["source"] = "credentials"
+            d["error"] = last_error or "OAuth usage API unavailable"
             d["installed"] = True
             return d
         except Exception as e:
@@ -1035,6 +1040,7 @@ def _panel_status_payload(claude, codex):
         "provider": "Codex",
         "available": bool(codex.get("available", False)),
         "source": codex.get("source", "none"),
+        "error": codex.get("error"),
         "updated": codex.get("updated", "Never"),
         "updated_epoch": codex.get("updated_epoch"),
         "plan": codex.get("plan", ""),
@@ -1055,6 +1061,7 @@ def _panel_status_payload(claude, codex):
             "provider": "Claude",
             "available": bool(claude.get("installed", False)),
             "source": claude.get("source", "none"),
+            "error": claude.get("error"),
             "updated": claude.get("updated", "Never"),
             "updated_epoch": claude.get("updated_epoch"),
             "plan": claude.get("plan", ""),

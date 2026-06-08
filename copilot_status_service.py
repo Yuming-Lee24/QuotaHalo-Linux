@@ -292,7 +292,7 @@ def _error_payload(message):
     return {
         "provider": "GitHub Copilot",
         "state": "error",
-        "label": "Copilot ERR",
+        "label": "Copilot --",
         "error": message,
         "updated": _updated_text(now),
         "timestamp": now.isoformat(),

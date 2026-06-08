@@ -235,18 +235,33 @@ function drawProgressBar(area, pctValue, provider) {
     cr.$dispose();
 }
 
-function panelLabelText(status) {
-    var label = status && status.label ? String(status.label) : 'Codex --';
-    var used;
+function hasCodexProvider(status) {
+    return !!(status && status.provider === 'Codex' && status.available);
+}
 
-    if (status && status.provider === 'Codex' &&
-        status.source !== 'none' && status.source !== 'config') {
-        used = Math.round(usedPercent(status, 'session_used_pct'));
-        return String(used) + '%';
-    }
-    if (label.indexOf('Codex ') === 0)
-        return label.slice(6);
-    return label;
+function hasCodexQuota(status) {
+    if (!hasCodexProvider(status))
+        return false;
+    if (status.source === 'none' || status.source === 'config')
+        return false;
+    return status.session_used_pct !== undefined && status.session_used_pct !== null;
+}
+
+function codexLabelText(status) {
+    if (!hasCodexProvider(status))
+        return '';
+    if (!hasCodexQuota(status))
+        return '--';
+    return String(Math.round(usedPercent(status, 'session_used_pct'))) + '%';
+}
+
+function panelLabelText(status) {
+    return codexLabelText(status);
+}
+
+function hasClaudeProvider(status) {
+    var claude = status && status.claude ? status.claude : null;
+    return !!(claude && claude.available);
 }
 
 function hasClaudeQuota(status) {
@@ -261,7 +276,7 @@ function hasClaudeQuota(status) {
 function claudeLabelText(status) {
     var claude = status && status.claude ? status.claude : null;
 
-    if (!claude || !claude.available)
+    if (!hasClaudeProvider(status))
         return '';
     if (!hasClaudeQuota(claude))
         return '--';
@@ -282,11 +297,15 @@ function copilotUsedPercent(status) {
     return clampPercent(status.pct_used);
 }
 
+function hasCopilotProvider(status) {
+    return !!(status && status.state !== 'missing');
+}
+
 function copilotLabelText(status) {
-    if (!status || status.state === 'missing')
+    if (!hasCopilotProvider(status))
         return '';
     if (status.state === 'error')
-        return 'ERR';
+        return '--';
     if (status.pct_used !== undefined && status.pct_used !== null)
         return String(Math.round(clampPercent(status.pct_used))) + '%';
     return '--';
@@ -390,6 +409,32 @@ function providerSourceText(status) {
     if (status.updated && status.updated !== 'Never')
         parts.push(compactUpdatedText(status.updated));
     return parts.length ? parts.join('  ·  ') : 'No data';
+}
+
+function statusErrorText(status) {
+    if (!status)
+        return '';
+    return String(status.error || status.refresh_error || '');
+}
+
+function unavailableDetailText(status) {
+    var error = statusErrorText(status);
+
+    if (error)
+        return 'Usage unavailable  ·  ' + error;
+    return 'Usage unavailable  ·  ' + providerSourceText(status);
+}
+
+function preferredUpdatedText(status, copilotStatus) {
+    var claude = status && status.claude ? status.claude : null;
+
+    if (hasCodexProvider(status) && status.updated && status.updated !== 'Never')
+        return compactUpdatedText(status.updated);
+    if (claude && claude.available && claude.updated && claude.updated !== 'Never')
+        return compactUpdatedText(claude.updated);
+    if (hasCopilotProvider(copilotStatus) && copilotStatus.updated && copilotStatus.updated !== 'Never')
+        return compactUpdatedText(copilotStatus.updated);
+    return compactUpdatedText('Never');
 }
 
 function actorSummary(actor) {
@@ -790,6 +835,8 @@ QuotaHaloUsageIndicator.prototype = {
         this._box.add_child(this._label);
         this._box.add_child(this._claudeWrap);
         this._box.add_child(this._claudeLabel);
+        this._setCopilotLabel(copilotStatus);
+        this._setCodexLabel(status);
         this._setClaudeLabel(status);
 
         this._button = new St.Button({
@@ -817,18 +864,22 @@ QuotaHaloUsageIndicator.prototype = {
         this._copilotHeader = this._addProviderHeader('Copilot', COPILOT_ICON_PATH, 'copilot');
         this._copilotItem = this._addUsageDetailRow('AI Credits', 'copilot');
         this._copilotUnavailableItem = this._addMessageItem('Copilot usage unavailable');
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._copilotSeparator = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._copilotSeparator);
 
         this._codexHeader = this._addProviderHeader('Codex', OPENAI_ICON_PATH, 'openai');
         this._sessionItem = this._addUsageDetailRow('5h Session', 'openai');
         this._weeklyItem = this._addUsageDetailRow('7d Usage', 'openai');
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._codexUnavailableItem = this._addMessageItem('Codex usage unavailable');
+        this._codexSeparator = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._codexSeparator);
 
         this._claudeHeader = this._addProviderHeader('Claude', CLAUDE_ICON_PATH, 'claude');
         this._claudeItem = this._addUsageDetailRow('5h Session', 'claude');
         this._claudeWeeklyItem = this._addUsageDetailRow('7d Usage', 'claude');
         this._claudeUnavailableItem = this._addMessageItem('Claude usage unavailable');
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._claudeSeparator = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._claudeSeparator);
 
         this._updatedItem = this._addMetaItem('Updated', '--');
         this._costItem = this._addMetaItem('Estimate', '--');
@@ -1107,7 +1158,7 @@ QuotaHaloUsageIndicator.prototype = {
             setItemVisible(this._copilotHeader.item, false);
             setItemVisible(this._copilotItem.item, false);
             setItemVisible(this._copilotUnavailableItem.item, false);
-            return;
+            return false;
         }
 
         setItemVisible(this._copilotHeader.item, true);
@@ -1122,9 +1173,8 @@ QuotaHaloUsageIndicator.prototype = {
         if (status.state === 'error' || status.pct_used === undefined || status.pct_used === null) {
             setItemVisible(this._copilotItem.item, false);
             setItemVisible(this._copilotUnavailableItem.item, true);
-            this._copilotUnavailableItem.label.set_text(
-                'Usage unavailable  ·  ' + (status.error || status.state));
-            return;
+            this._copilotUnavailableItem.label.set_text(unavailableDetailText(status));
+            return true;
         }
 
         used = status.usage_used !== undefined ? status.usage_used : status.requests_used;
@@ -1144,6 +1194,60 @@ QuotaHaloUsageIndicator.prototype = {
             usageNumberText(used, status) + '/' + usageNumberText(limit, status) + ' ' + unit +
             '  ·  today ' + usageNumberText(today, status) +
             '  ·  left ' + usageNumberText(remaining, status));
+        return true;
+    },
+
+    _setCodexLabel: function(status) {
+        var text = codexLabelText(status);
+
+        this._label.set_text(text);
+        if (text) {
+            this._ringWrap.show();
+            this._label.show();
+        } else {
+            this._ringWrap.hide();
+            this._label.hide();
+        }
+    },
+
+    _setCodexDetails: function(status) {
+        if (!hasCodexProvider(status)) {
+            setItemVisible(this._codexHeader.item, false);
+            setItemVisible(this._sessionItem.item, false);
+            setItemVisible(this._weeklyItem.item, false);
+            setItemVisible(this._codexUnavailableItem.item, false);
+            return false;
+        }
+
+        setItemVisible(this._codexHeader.item, true);
+        this._codexHeader.subtitleLabel.set_text(providerSourceText(status));
+
+        if (!hasCodexQuota(status)) {
+            setItemVisible(this._sessionItem.item, false);
+            setItemVisible(this._weeklyItem.item, false);
+            setItemVisible(this._codexUnavailableItem.item, true);
+            this._codexUnavailableItem.label.set_text(unavailableDetailText(status));
+            return true;
+        }
+
+        setItemVisible(this._sessionItem.item, true);
+        setItemVisible(this._weeklyItem.item, true);
+        setItemVisible(this._codexUnavailableItem.item, false);
+        this._setUsageDetailRow(
+            this._sessionItem,
+            status,
+            'session_used_pct',
+            'session_remaining_pct',
+            status.session_reset,
+            true);
+        this._setUsageDetailRow(
+            this._weeklyItem,
+            status,
+            'weekly_used_pct',
+            'weekly_remaining_pct',
+            status.weekly_reset,
+            true);
+        return true;
     },
 
     _setClaudeLabel: function(status) {
@@ -1167,7 +1271,7 @@ QuotaHaloUsageIndicator.prototype = {
             setItemVisible(this._claudeItem.item, false);
             setItemVisible(this._claudeWeeklyItem.item, false);
             setItemVisible(this._claudeUnavailableItem.item, false);
-            return;
+            return false;
         }
         setItemVisible(this._claudeHeader.item, true);
         this._claudeHeader.subtitleLabel.set_text(providerSourceText(claude));
@@ -1175,8 +1279,8 @@ QuotaHaloUsageIndicator.prototype = {
             setItemVisible(this._claudeItem.item, false);
             setItemVisible(this._claudeWeeklyItem.item, false);
             setItemVisible(this._claudeUnavailableItem.item, true);
-            this._claudeUnavailableItem.label.set_text('Usage unavailable  ·  ' + providerSourceText(claude));
-            return;
+            this._claudeUnavailableItem.label.set_text(unavailableDetailText(claude));
+            return true;
         }
         setItemVisible(this._claudeItem.item, true);
         setItemVisible(this._claudeWeeklyItem.item, true);
@@ -1195,6 +1299,7 @@ QuotaHaloUsageIndicator.prototype = {
             'weekly_remaining_pct',
             claude.weekly_reset,
             true);
+        return true;
     },
 
     _setUsageDetailRow: function(row, status, usedKey, remainingKey, resetValue, available) {
@@ -1393,10 +1498,13 @@ QuotaHaloUsageIndicator.prototype = {
         var copilotStatus = readCopilotStatus();
         var today;
         var total;
-        var hasCodexUsage;
+        var showCopilot;
+        var showCodex;
+        var showClaude;
+        var footerVisible;
 
         this._setCopilotLabel(copilotStatus);
-        this._label.set_text(panelLabelText(status));
+        this._setCodexLabel(status);
         this._setClaudeLabel(status);
         this._copilotPct = copilotUsedPercent(copilotStatus);
         this._weeklyPct = usedPercent(status, 'weekly_used_pct');
@@ -1408,26 +1516,24 @@ QuotaHaloUsageIndicator.prototype = {
         if (this._claudeRing.queue_repaint)
             this._claudeRing.queue_repaint();
 
-        this._setCopilotDetails(copilotStatus);
-        hasCodexUsage = status && status.source !== 'none' && status.source !== 'config';
-        this._codexHeader.subtitleLabel.set_text(providerSourceText(status));
-        this._setUsageDetailRow(
-            this._sessionItem,
-            status,
-            'session_used_pct',
-            'session_remaining_pct',
-            status.session_reset,
-            hasCodexUsage);
-        this._setUsageDetailRow(
-            this._weeklyItem,
-            status,
-            'weekly_used_pct',
-            'weekly_remaining_pct',
-            status.weekly_reset,
-            hasCodexUsage);
-        this._setClaudeDetails(status);
+        showCopilot = this._setCopilotDetails(copilotStatus);
+        showCodex = this._setCodexDetails(status);
+        showClaude = this._setClaudeDetails(status);
+        footerVisible = showCopilot || showCodex || showClaude;
 
-        this._updatedItem.valueLabel.set_text(compactUpdatedText(status.updated));
+        if (footerVisible)
+            this._button.show();
+        else
+            this._button.hide();
+
+        setItemVisible(this._copilotSeparator, showCopilot);
+        setItemVisible(this._codexSeparator, showCodex);
+        setItemVisible(this._claudeSeparator, showClaude);
+        setItemVisible(this._updatedItem.item, footerVisible);
+        setItemVisible(this._costItem.item, showCodex && hasCodexQuota(status));
+        setItemVisible(this._refreshItem, footerVisible);
+
+        this._updatedItem.valueLabel.set_text(preferredUpdatedText(status, copilotStatus));
         if (!this._refreshing)
             this._refreshItem.label.set_text('Refresh now');
 
