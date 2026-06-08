@@ -196,6 +196,7 @@ class ClaudeDataFetcher:
             "session_used_pct": 0, "session_reset": "unknown", "session_reset_epoch": None,
             "weekly_used_pct": 0, "weekly_reset": "unknown", "weekly_reset_epoch": None,
             "opus_used_pct": 0,
+            "model": "",
             "cost_today": 0.0, "cost_today_tokens": "0",
             "cost_30d": 0.0, "cost_30d_tokens": "0",
             "source": "none", "error": None,
@@ -210,6 +211,8 @@ class ClaudeDataFetcher:
                 return None
             raw.pop("_cached_at", None)
             if raw.get("source") in ("oauth", "cli"):
+                raw["plan"] = self._local_subscription_plan() or self._format_plan(
+                    raw.get("plan"), raw.get("plan") or "Unknown")
                 raw["installed"] = True
                 return raw
         except Exception:
@@ -225,7 +228,7 @@ class ClaudeDataFetcher:
             d = self._empty()
             d.update({
                 "provider": "Claude",
-                "plan": claude.get("plan", "Unknown"),
+                "plan": self._format_plan(claude.get("plan"), claude.get("plan") or "Unknown"),
                 "updated": claude.get("updated", "Never"),
                 "updated_epoch": claude.get("updated_epoch"),
                 "session_used_pct": _clamp_pct(claude.get("session_used_pct", 0)),
@@ -234,6 +237,7 @@ class ClaudeDataFetcher:
                 "weekly_used_pct": _clamp_pct(claude.get("weekly_used_pct", 0)),
                 "weekly_reset": claude.get("weekly_reset") or "unknown",
                 "weekly_reset_epoch": claude.get("weekly_reset_epoch"),
+                "model": claude.get("model", ""),
                 "source": claude.get("source"),
                 "installed": bool(claude.get("available", True)),
             })
@@ -259,6 +263,39 @@ class ClaudeDataFetcher:
             return (time.time() - failed_at) < CLAUDE_OAUTH_BACKOFF_SECONDS
         except Exception:
             return False
+
+    def _format_plan(self, tier, fallback="Pro"):
+        value = str(tier or "").strip()
+        normalized = value.lower()
+        if normalized.startswith("default_claude_"):
+            normalized = normalized[len("default_claude_"):]
+        normalized = normalized.replace("-", "_").replace(" ", "_")
+        names = {
+            "ai": "Claude AI",
+            "claude_ai": "Claude AI",
+            "pro": "Pro",
+            "max": "Max",
+            "team": "Team",
+            "enterprise": "Enterprise",
+            "free": "Free",
+        }
+        if normalized in names:
+            return names[normalized]
+        if normalized:
+            return normalized.replace("_", " ").title()
+        return fallback
+
+    def _local_subscription_plan(self):
+        try:
+            if not self._CREDS_PATH.exists():
+                return ""
+            creds = json.loads(self._CREDS_PATH.read_text(encoding="utf-8"))
+            oauth = creds.get("claudeAiOauth") or {}
+            subscription = oauth.get("subscriptionType") or ""
+            tier = oauth.get("rateLimitTier") or ""
+            return self._format_plan(subscription or tier, "")
+        except Exception:
+            return ""
 
     def _record_oauth_failure(self, error):
         try:
@@ -319,6 +356,8 @@ class ClaudeDataFetcher:
                 else:
                     stale = self._load_status_fallback()
                     if stale:
+                        if cred.get("plan") and cred.get("plan") != "Unknown":
+                            stale["plan"] = cred["plan"]
                         self.data = stale
                         got_usage = True
                         used_usage_cache = True
@@ -350,6 +389,8 @@ class ClaudeDataFetcher:
             self.data["cost_today_tokens"] = cost["cost_today_tokens"]
             self.data["cost_30d"] = cost["cost_30d"]
             self.data["cost_30d_tokens"] = cost["cost_30d_tokens"]
+            if cost.get("model"):
+                self.data["model"] = cost["model"]
             if self.data["source"] == "none":
                 self.data["source"] = "logs"
             print(f"  OK Logs: today ${cost['cost_today']:.2f}, 30d ${cost['cost_30d']:.2f}")
@@ -517,8 +558,9 @@ class ClaudeDataFetcher:
             if not token:
                 return None
 
-            tier = oauth.get("rateLimitTier") or oauth.get("subscriptionType") or ""
-            plan_local = tier.replace("default_claude_", "").replace("_", " ").title() or "Pro"
+            tier = oauth.get("rateLimitTier") or ""
+            subscription = oauth.get("subscriptionType") or ""
+            plan_local = self._format_plan(subscription or tier)
             print(f"    OAuth: credentials found, plan: {plan_local}", flush=True)
 
             if self._oauth_backoff_active():
@@ -654,6 +696,8 @@ class ClaudeDataFetcher:
     def _fetch_jsonl(self):
         dirs = [Path.home() / ".claude" / "projects", Path.home() / ".claude"]
         total_in = total_out = total_cache = today_in = today_out = 0
+        latest_model = ""
+        latest_model_at = -1
         seen = set()
         today = datetime.now().date()
         nfiles = 0
@@ -661,6 +705,8 @@ class ClaudeDataFetcher:
         for d in dirs:
             if not d.exists(): continue
             for f in d.rglob("*.jsonl"):
+                if "_usage_trash_" in str(f):
+                    continue
                 nfiles += 1
                 try:
                     with open(f, 'r', encoding='utf-8', errors='ignore') as fh:
@@ -670,6 +716,18 @@ class ClaudeDataFetcher:
                             try: entry = json.loads(line)
                             except Exception: continue
                             if entry.get("type") != "assistant": continue
+                            msg = entry.get("message",{})
+                            model = msg.get("model") or entry.get("model")
+                            if model:
+                                try:
+                                    ts = entry.get("timestamp","")
+                                    model_at = datetime.fromisoformat(
+                                        ts.replace("Z","+00:00")).timestamp() if ts else f.stat().st_mtime
+                                except Exception:
+                                    model_at = f.stat().st_mtime
+                                if model_at > latest_model_at:
+                                    latest_model = str(model)
+                                    latest_model_at = model_at
                             usage = entry.get("message",{}).get("usage",{})
                             if not usage: continue
                             mid = entry.get("message",{}).get("id","")
@@ -704,6 +762,7 @@ class ClaudeDataFetcher:
         return {
             "cost_today": round(ct,2), "cost_today_tokens": fmt(today_in+today_out),
             "cost_30d": round(c30,2), "cost_30d_tokens": fmt(total_in+total_out+total_cache),
+            "model": latest_model,
         }
 
 
@@ -1057,6 +1116,7 @@ def _panel_status_payload(claude, codex):
         "cost_today_tokens": codex.get("cost_today_tokens", "0"),
         "cost_30d": codex.get("cost_30d", 0),
         "cost_30d_tokens": codex.get("cost_30d_tokens", "0"),
+        "cost_window": "30d",
         "claude": {
             "provider": "Claude",
             "available": bool(claude.get("installed", False)),
@@ -1065,6 +1125,7 @@ def _panel_status_payload(claude, codex):
             "updated": claude.get("updated", "Never"),
             "updated_epoch": claude.get("updated_epoch"),
             "plan": claude.get("plan", ""),
+            "model": claude.get("model", ""),
             "session_used_pct": _clamp_pct(claude.get("session_used_pct", 0)),
             "session_remaining_pct": _remaining_pct(claude.get("session_used_pct", 0)),
             "session_reset": _compact_reset(claude.get("session_reset")),
@@ -1073,6 +1134,11 @@ def _panel_status_payload(claude, codex):
             "weekly_remaining_pct": _remaining_pct(claude.get("weekly_used_pct", 0)),
             "weekly_reset": _compact_reset(claude.get("weekly_reset")),
             "weekly_reset_epoch": claude.get("weekly_reset_epoch"),
+            "cost_today": claude.get("cost_today", 0),
+            "cost_today_tokens": claude.get("cost_today_tokens", "0"),
+            "cost_30d": claude.get("cost_30d", 0),
+            "cost_30d_tokens": claude.get("cost_30d_tokens", "0"),
+            "cost_window": "30d",
         },
     }
 

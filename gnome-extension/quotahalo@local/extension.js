@@ -205,7 +205,178 @@ function usageRingColor(value, provider) {
     return [0.06, 0.64, 0.50, 1.0];
 }
 
-function drawProgressBar(area, pctValue, provider) {
+function copilotModelColor(model, index) {
+    var text = String(model || '').toLowerCase();
+    var palette = [
+        [0.34, 0.62, 0.96, 1.0],
+        [0.06, 0.64, 0.50, 1.0],
+        [0.69, 0.48, 0.97, 1.0],
+        [0.91, 0.66, 0.24, 1.0],
+        [0.93, 0.42, 0.52, 1.0],
+        [0.20, 0.74, 0.80, 1.0],
+    ];
+
+    if (text.indexOf('codex') >= 0)
+        return [0.06, 0.64, 0.50, 1.0];
+    if (text.indexOf('gpt-5.4') >= 0)
+        return [0.34, 0.62, 0.96, 1.0];
+    if (text.indexOf('gpt-5.3') >= 0)
+        return [0.69, 0.48, 0.97, 1.0];
+    return palette[index % palette.length];
+}
+
+function shortCopilotModelName(model) {
+    var text = String(model || 'Model').trim();
+
+    return text.replace(/^Auto:\s*/i, '');
+}
+
+function copilotModelSegments(status) {
+    var models = status && status.top_models ? status.top_models : [];
+    var used = Number(status && (status.usage_used !== undefined ?
+        status.usage_used : status.requests_used));
+    var pct = clampPercent(status ? status.pct_used : 0);
+    var total = 0;
+    var denom;
+    var segments = [];
+    var i;
+    var quantity;
+    var model;
+    var segmentPct;
+    var share;
+    var remainder;
+
+    if (!models.length || pct <= 0)
+        return [];
+
+    for (i = 0; i < models.length; i++) {
+        quantity = Number(models[i].quantity || 0);
+        if (!isNaN(quantity) && quantity > 0)
+            total += quantity;
+    }
+    if (total <= 0)
+        return [];
+    if (isNaN(used) || used <= 0)
+        used = total;
+    denom = Math.max(used, total);
+
+    for (i = 0; i < models.length; i++) {
+        quantity = Number(models[i].quantity || 0);
+        if (isNaN(quantity) || quantity <= 0)
+            continue;
+        model = shortCopilotModelName(models[i].model);
+        segmentPct = pct * quantity / denom;
+        share = 100 * quantity / denom;
+        segments.push({
+            pct: segmentPct,
+            share: share,
+            label: model,
+            color: copilotModelColor(model, segments.length),
+        });
+    }
+
+    remainder = used - total;
+    if (remainder > 0.01) {
+        segments.push({
+            pct: pct * remainder / denom,
+            share: 100 * remainder / denom,
+            label: 'Other',
+            color: [0.58, 0.64, 0.72, 1.0],
+        });
+    }
+    return segments;
+}
+
+function copilotModelBreakdownText(segments) {
+    var parts = [];
+    var i;
+    var segment;
+
+    for (i = 0; i < Math.min(segments.length, 3); i++) {
+        segment = segments[i];
+        parts.push(segment.label + ' ' + String(Math.round(segment.share)) + '%');
+    }
+    if (segments.length > 3)
+        parts.push('Other models');
+    return parts.join('  ·  ');
+}
+
+function drawSegmentedProgressBar(area, pctValue, segments) {
+    var alloc = area.get_allocation_box();
+    var width = alloc.x2 - alloc.x1;
+    var height = alloc.y2 - alloc.y1;
+    var padding = 4;
+    var y = Math.max(4, height / 2);
+    var usable = Math.max(0, width - padding * 2);
+    var pct = clampPercent(pctValue);
+    var cr = area.get_context();
+    var lineWidth = Math.max(5, Math.min(7, height - 2));
+    var half = lineWidth / 2;
+    var usedEnd = padding + usable * pct / 100;
+    var x = padding;
+    var i;
+    var segment;
+    var next;
+    var color;
+    var firstColor = null;
+    var lastColor = null;
+    var totalPct = 0;
+
+    cr.setLineCap(Cairo.LineCap.ROUND);
+    cr.setLineWidth(lineWidth);
+    cr.setSourceRGBA(1.0, 1.0, 1.0, 0.12);
+    cr.moveTo(padding, y);
+    cr.lineTo(width - padding, y);
+    cr.stroke();
+
+    if (pct <= 0) {
+        cr.$dispose();
+        return;
+    }
+
+    for (i = 0; i < segments.length; i++) {
+        segment = segments[i];
+        totalPct += clampPercent(segment.pct);
+        next = padding + usable * Math.min(totalPct, pct) / 100;
+        if (next <= x)
+            continue;
+        color = segment.color || usageRingColor(pct, 'copilot');
+        if (!firstColor)
+            firstColor = color;
+        lastColor = color;
+        cr.setSourceRGBA(color[0], color[1], color[2], color[3]);
+        cr.rectangle(x, y - half, next - x, lineWidth);
+        cr.fill();
+        x = next;
+        if (x >= usedEnd)
+            break;
+    }
+
+    if (x < usedEnd) {
+        color = [0.58, 0.64, 0.72, 1.0];
+        if (!firstColor)
+            firstColor = color;
+        lastColor = color;
+        cr.setSourceRGBA(color[0], color[1], color[2], color[3]);
+        cr.rectangle(x, y - half, usedEnd - x, lineWidth);
+        cr.fill();
+    }
+
+    if (firstColor) {
+        cr.setSourceRGBA(firstColor[0], firstColor[1], firstColor[2], firstColor[3]);
+        cr.arc(padding, y, half, 0, Math.PI * 2);
+        cr.fill();
+    }
+    if (lastColor) {
+        cr.setSourceRGBA(lastColor[0], lastColor[1], lastColor[2], lastColor[3]);
+        cr.arc(usedEnd, y, half, 0, Math.PI * 2);
+        cr.fill();
+    }
+
+    cr.$dispose();
+}
+
+function drawProgressBar(area, pctValue, provider, segments) {
     var alloc = area.get_allocation_box();
     var width = alloc.x2 - alloc.x1;
     var height = alloc.y2 - alloc.y1;
@@ -214,9 +385,15 @@ function drawProgressBar(area, pctValue, provider) {
     var usable = Math.max(0, width - padding * 2);
     var pct = clampPercent(pctValue);
     var color = usageRingColor(pct, provider);
-    var cr = area.get_context();
     var end = padding + usable * pct / 100;
+    var cr;
 
+    if (provider === 'copilot' && segments && segments.length) {
+        drawSegmentedProgressBar(area, pct, segments);
+        return;
+    }
+
+    cr = area.get_context();
     cr.setLineCap(Cairo.LineCap.ROUND);
     cr.setLineWidth(Math.max(5, Math.min(7, height - 2)));
 
@@ -324,6 +501,35 @@ function usageNumberText(value, status) {
     return String(Math.round(n));
 }
 
+function providerModelText(status, provider) {
+    var model;
+
+    if (!status || !status.model)
+        return '';
+    model = String(status.model).trim();
+    if (provider === 'claude')
+        model = model.replace(/^claude[-_\s]*/i, '');
+    return model;
+}
+
+function providerHeaderMetaText(status, provider) {
+    var parts = [];
+    var model;
+
+    if (!status)
+        return 'No data';
+    if (status.plan)
+        parts.push(String(status.plan));
+    model = providerModelText(status, provider);
+    if (model)
+        parts.push(model);
+    if (status.stale)
+        parts.push('stale');
+    if (status.updated && status.updated !== 'Never')
+        parts.push(compactUpdatedText(status.updated));
+    return parts.length ? parts.join('  ·  ') : 'No data';
+}
+
 function copilotUnitText(status) {
     if (status && status.unit === 'credits')
         return 'credits';
@@ -397,6 +603,7 @@ function addItemStyle(item, styleClass) {
 
 function providerSourceText(status) {
     var parts = [];
+    var source;
 
     if (!status)
         return 'No data';
@@ -404,8 +611,11 @@ function providerSourceText(status) {
         parts.push(String(status.plan));
     if (status.model)
         parts.push(String(status.model));
-    if (status.source && status.source !== 'none')
-        parts.push(String(status.source));
+    if (status.unit_label && !status.plan)
+        parts.push(String(status.unit_label));
+    source = status.source ? String(status.source) : '';
+    if (source && source !== 'none' && source !== 'oauth' && source !== 'sessions')
+        parts.push(source);
     if (status.updated && status.updated !== 'Never')
         parts.push(compactUpdatedText(status.updated));
     return parts.length ? parts.join('  ·  ') : 'No data';
@@ -423,18 +633,6 @@ function unavailableDetailText(status) {
     if (error)
         return 'Usage unavailable  ·  ' + error;
     return 'Usage unavailable  ·  ' + providerSourceText(status);
-}
-
-function preferredUpdatedText(status, copilotStatus) {
-    var claude = status && status.claude ? status.claude : null;
-
-    if (hasCodexProvider(status) && status.updated && status.updated !== 'Never')
-        return compactUpdatedText(status.updated);
-    if (claude && claude.available && claude.updated && claude.updated !== 'Never')
-        return compactUpdatedText(claude.updated);
-    if (hasCopilotProvider(copilotStatus) && copilotStatus.updated && copilotStatus.updated !== 'Never')
-        return compactUpdatedText(copilotStatus.updated);
-    return compactUpdatedText('Never');
 }
 
 function actorSummary(actor) {
@@ -881,8 +1079,6 @@ QuotaHaloUsageIndicator.prototype = {
         this._claudeSeparator = new PopupMenu.PopupSeparatorMenuItem();
         this.menu.addMenuItem(this._claudeSeparator);
 
-        this._updatedItem = this._addMetaItem('Updated', '--');
-        this._costItem = this._addMetaItem('Estimate', '--');
         this._refreshItem = new PopupMenu.PopupMenuItem('Refresh now');
         addItemStyle(this._refreshItem, 'quotahalo-refresh-item');
         this.menu.addMenuItem(this._refreshItem);
@@ -975,10 +1171,27 @@ QuotaHaloUsageIndicator.prototype = {
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'quotahalo-provider-copy',
         });
+        var titleRow = new St.BoxLayout({
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-title-row',
+        });
         var titleLabel = new St.Label({
             text: title,
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'quotahalo-provider-title',
+        });
+        var titleSpacer = new St.Widget({
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-title-spacer',
+        });
+        var metaLabel = new St.Label({
+            text: '',
+            x_expand: false,
+            x_align: Clutter.ActorAlign.END,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-provider-meta',
         });
         var subtitleLabel = new St.Label({
             text: '',
@@ -1005,8 +1218,13 @@ QuotaHaloUsageIndicator.prototype = {
             });
         }
         badge.add_child(icon);
-        labels.add_child(titleLabel);
+        titleRow.add_child(titleLabel);
+        titleRow.add_child(titleSpacer);
+        titleRow.add_child(metaLabel);
+        labels.add_child(titleRow);
         labels.add_child(subtitleLabel);
+        metaLabel.hide();
+        subtitleLabel.hide();
         box.add_child(badge);
         box.add_child(labels);
         item.add_child(box);
@@ -1014,6 +1232,7 @@ QuotaHaloUsageIndicator.prototype = {
         return {
             item: item,
             titleLabel: titleLabel,
+            metaLabel: metaLabel,
             subtitleLabel: subtitleLabel,
         };
     },
@@ -1064,10 +1283,11 @@ QuotaHaloUsageIndicator.prototype = {
             bar: bar,
             provider: provider,
             pct: 0,
+            segments: [],
         };
 
         bar.connect('repaint', function(area) {
-            drawProgressBar(area, row.pct, provider);
+            drawProgressBar(area, row.pct, provider, row.segments);
         });
         top.add_child(titleLabel);
         top.add_child(valueLabel);
@@ -1152,7 +1372,9 @@ QuotaHaloUsageIndicator.prototype = {
         var limit;
         var remaining;
         var unit;
-        var subtitle;
+        var segments;
+        var modelsText;
+        var metaText;
 
         if (!status || status.state === 'missing') {
             setItemVisible(this._copilotHeader.item, false);
@@ -1162,13 +1384,10 @@ QuotaHaloUsageIndicator.prototype = {
         }
 
         setItemVisible(this._copilotHeader.item, true);
-        subtitle = (status.unit_label || 'usage') + '  ·  ' +
-            (status.source_endpoint || status.state || 'cache');
-        if (status.stale)
-            subtitle += '  ·  stale';
-        if (status.updated && status.updated !== 'Never')
-            subtitle += '  ·  ' + compactUpdatedText(status.updated);
-        this._copilotHeader.subtitleLabel.set_text(subtitle);
+        this._setProviderHeaderLines(
+            this._copilotHeader,
+            providerHeaderMetaText(status, 'copilot'),
+            '');
 
         if (status.state === 'error' || status.pct_used === undefined || status.pct_used === null) {
             setItemVisible(this._copilotItem.item, false);
@@ -1184,6 +1403,15 @@ QuotaHaloUsageIndicator.prototype = {
         remaining = status.usage_remaining !== undefined ?
             status.usage_remaining : status.remaining_requests;
         unit = copilotUnitText(status);
+        segments = copilotModelSegments(status);
+        modelsText = copilotModelBreakdownText(segments);
+        metaText = usageNumberText(used, status) + '/' + usageNumberText(limit, status) +
+            ' ' + unit;
+        if (modelsText)
+            metaText += '  ·  ' + modelsText;
+        else
+            metaText += '  ·  today ' + usageNumberText(today, status) +
+                '  ·  left ' + usageNumberText(remaining, status);
 
         setItemVisible(this._copilotItem.item, true);
         setItemVisible(this._copilotUnavailableItem.item, false);
@@ -1191,9 +1419,8 @@ QuotaHaloUsageIndicator.prototype = {
             this._copilotItem,
             status.pct_used,
             String(Math.round(clampPercent(status.pct_remaining))) + '% remaining',
-            usageNumberText(used, status) + '/' + usageNumberText(limit, status) + ' ' + unit +
-            '  ·  today ' + usageNumberText(today, status) +
-            '  ·  left ' + usageNumberText(remaining, status));
+            metaText,
+            segments);
         return true;
     },
 
@@ -1220,7 +1447,10 @@ QuotaHaloUsageIndicator.prototype = {
         }
 
         setItemVisible(this._codexHeader.item, true);
-        this._codexHeader.subtitleLabel.set_text(providerSourceText(status));
+        this._setProviderHeaderLines(
+            this._codexHeader,
+            providerHeaderMetaText(status, 'codex'),
+            '');
 
         if (!hasCodexQuota(status)) {
             setItemVisible(this._sessionItem.item, false);
@@ -1274,7 +1504,10 @@ QuotaHaloUsageIndicator.prototype = {
             return false;
         }
         setItemVisible(this._claudeHeader.item, true);
-        this._claudeHeader.subtitleLabel.set_text(providerSourceText(claude));
+        this._setProviderHeaderLines(
+            this._claudeHeader,
+            providerHeaderMetaText(claude, 'claude'),
+            '');
         if (!hasClaudeQuota(claude)) {
             setItemVisible(this._claudeItem.item, false);
             setItemVisible(this._claudeWeeklyItem.item, false);
@@ -1302,12 +1535,22 @@ QuotaHaloUsageIndicator.prototype = {
         return true;
     },
 
+    _setProviderHeaderLines: function(header, metaText, subtitleText) {
+        metaText = metaText || '';
+        subtitleText = subtitleText || '';
+        header.metaLabel.set_text(metaText);
+        header.subtitleLabel.set_text(subtitleText);
+        setItemVisible(header.metaLabel, metaText.length > 0);
+        setItemVisible(header.subtitleLabel, subtitleText.length > 0);
+    },
+
     _setUsageDetailRow: function(row, status, usedKey, remainingKey, resetValue, available) {
         var remaining;
         var meta = [];
 
         if (!available) {
             row.pct = 0;
+            row.segments = [];
             row.valueLabel.set_text('--');
             row.metaLabel.set_text('Usage unavailable');
             if (row.bar.queue_repaint)
@@ -1316,6 +1559,7 @@ QuotaHaloUsageIndicator.prototype = {
         }
 
         row.pct = usedPercent(status, usedKey);
+        row.segments = [];
         row.valueLabel.set_text(String(Math.round(row.pct)) + '%');
         remaining = remainingPercent(status, usedKey, remainingKey);
         if (remaining !== null)
@@ -1326,8 +1570,9 @@ QuotaHaloUsageIndicator.prototype = {
             row.bar.queue_repaint();
     },
 
-    _setPlainUsageDetailRow: function(row, pct, remainingText, metaText) {
+    _setPlainUsageDetailRow: function(row, pct, remainingText, metaText, segments) {
         row.pct = clampPercent(pct);
+        row.segments = segments || [];
         row.valueLabel.set_text(String(Math.round(row.pct)) + '%');
         row.metaLabel.set_text(remainingText + '  ·  ' + metaText);
         if (row.bar.queue_repaint)
@@ -1496,8 +1741,6 @@ QuotaHaloUsageIndicator.prototype = {
     _update: function() {
         var status = readStatus();
         var copilotStatus = readCopilotStatus();
-        var today;
-        var total;
         var showCopilot;
         var showCodex;
         var showClaude;
@@ -1529,18 +1772,10 @@ QuotaHaloUsageIndicator.prototype = {
         setItemVisible(this._copilotSeparator, showCopilot);
         setItemVisible(this._codexSeparator, showCodex);
         setItemVisible(this._claudeSeparator, showClaude);
-        setItemVisible(this._updatedItem.item, footerVisible);
-        setItemVisible(this._costItem.item, showCodex && hasCodexQuota(status));
         setItemVisible(this._refreshItem, footerVisible);
 
-        this._updatedItem.valueLabel.set_text(preferredUpdatedText(status, copilotStatus));
         if (!this._refreshing)
             this._refreshItem.label.set_text('Refresh now');
-
-        today = status.cost_today !== undefined ? status.cost_today : 0;
-        total = status.cost_30d !== undefined ? status.cost_30d : 0;
-        this._costItem.valueLabel.set_text(
-            '$' + Number(today).toFixed(2) + ' today  ·  $' + Number(total).toFixed(2) + ' all');
         return true;
     },
 

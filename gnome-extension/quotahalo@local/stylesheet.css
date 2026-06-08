@@ -124,6 +124,14 @@
   spacing: 2px;
 }
 
+.quotahalo-provider-title-row {
+  spacing: 8px;
+}
+
+.quotahalo-provider-title-spacer {
+  min-width: 12px;
+}
+
 .quotahalo-provider-badge {
   border-radius: 999px;
   background-color: rgba(255, 255, 255, 0.10);
@@ -154,6 +162,13 @@
   color: rgba(248, 250, 252, 0.98);
   font-size: 14px;
   font-weight: 700;
+}
+
+.quotahalo-provider-meta {
+  color: rgba(203, 213, 225, 0.76);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: right;
 }
 
 .quotahalo-provider-subtitle {

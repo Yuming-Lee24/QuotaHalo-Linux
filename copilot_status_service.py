@@ -102,6 +102,20 @@ def _quantity(item):
     return 0.0
 
 
+def _money_amount(item):
+    for key in ("grossAmount", "netAmount", "discountAmount"):
+        value = item.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+    try:
+        return float(item.get("pricePerUnit") or 0) * _quantity(item)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _usage_day(item):
     date_str = str(item.get("date") or item.get("timestamp") or "")
     if not date_str:
@@ -137,19 +151,30 @@ def _parse_usage_items(data, predicate, default_model):
     total = 0.0
     usage_items = []
     daily_usage = {}
+    total_amount = 0.0
+    daily_amount = {}
 
     for item in data.get("usageItems", []):
         if not predicate(item):
             continue
         qty = _quantity(item)
+        amount = _money_amount(item)
         total += qty
-        usage_items.append((item.get("model") or item.get("sku") or default_model, qty))
+        total_amount += amount
+        usage_items.append(
+            {
+                "model": item.get("model") or item.get("sku") or default_model,
+                "quantity": qty,
+                "amount": amount,
+            }
+        )
 
         day = _usage_day(item)
         if day is not None:
             daily_usage[day] = daily_usage.get(day, 0.0) + qty
+            daily_amount[day] = daily_amount.get(day, 0.0) + amount
 
-    return total, usage_items, daily_usage
+    return total, usage_items, daily_usage, total_amount, daily_amount
 
 
 def _first_number(value):
@@ -232,7 +257,7 @@ def _get_usage_for_month(token, username, year, month):
         raise RuntimeError(_response_error(response, username))
 
     data = response.json()
-    total, usage_items, daily_usage = _parse_usage_items(
+    total, usage_items, daily_usage, usage_amount, daily_amount = _parse_usage_items(
         data, _is_copilot_ai_credit_item, "Copilot AI Credits"
     )
     limit = _find_limit_value(data)
@@ -248,6 +273,8 @@ def _get_usage_for_month(token, username, year, month):
         "source_endpoint": "ai_credit_usage",
         "limit": limit,
         "limit_source": "api" if limit is not None else "official_allowance",
+        "usage_amount": usage_amount,
+        "daily_amount": daily_amount,
     }
 
     if usage_items or total > 0:
@@ -257,7 +284,7 @@ def _get_usage_for_month(token, username, year, month):
         LEGACY_PREMIUM_REQUEST_URL.format(username), headers, params
     )
     if legacy_response.status_code == 200:
-        legacy_total, legacy_items, legacy_daily = _parse_usage_items(
+        legacy_total, legacy_items, legacy_daily, legacy_amount, legacy_daily_amount = _parse_usage_items(
             legacy_response.json(),
             _is_legacy_premium_request_item,
             "Copilot Premium Request",
@@ -268,6 +295,8 @@ def _get_usage_for_month(token, username, year, month):
                 "unit": "requests",
                 "unit_label": "requests",
                 "source_endpoint": "premium_request_usage",
+                "usage_amount": legacy_amount,
+                "daily_amount": legacy_daily_amount,
             }
 
     return total, usage_items, daily_usage, metadata
@@ -309,6 +338,10 @@ def _usage_limit(metadata, usage_used=0):
     return used
 
 
+def _copilot_plan(metadata, limit):
+    return "Pro"
+
+
 def _calculate_projection(limit, usage_used, current_day, days_in_month, now):
     if current_day <= 0 or usage_used <= 0:
         return "No usage data yet"
@@ -332,13 +365,29 @@ def _calculate_projection(limit, usage_used, current_day, days_in_month, now):
 
 
 def _top_models(usage_items):
-    items = sorted(usage_items or [], key=lambda item: item[1], reverse=True)
+    def quantity(item):
+        if isinstance(item, dict):
+            return float(item.get("quantity") or 0)
+        return float(item[1])
+
+    def model(item):
+        if isinstance(item, dict):
+            return str(item.get("model") or "Usage")
+        return str(item[0])
+
+    def amount(item):
+        if isinstance(item, dict):
+            return float(item.get("amount") or 0)
+        return 0.0
+
+    items = sorted(usage_items or [], key=quantity, reverse=True)
     return [
         {
-            "model": str(model),
-            "quantity": float(quantity),
+            "model": model(item),
+            "quantity": quantity(item),
+            "amount": amount(item),
         }
-        for model, quantity in items[:8]
+        for item in items[:8]
     ]
 
 
@@ -388,6 +437,11 @@ def build_status():
     usage_used_today = daily_usage.get(now.day, 0)
     if usage_used_today == 0 and now_utc.day != now.day:
         usage_used_today = daily_usage.get(now_utc.day, 0)
+    usage_amount = float(metadata.get("usage_amount") or 0)
+    daily_amount = metadata.get("daily_amount") or {}
+    usage_amount_today = daily_amount.get(now.day, 0)
+    if usage_amount_today == 0 and now_utc.day != now.day:
+        usage_amount_today = daily_amount.get(now_utc.day, 0)
 
     metrics = _calculate_usage_metrics(limit, usage_used, now.day, days_in_month)
     pct_remaining = metrics["remaining_requests_pct"]
@@ -403,6 +457,7 @@ def build_status():
         "billing_mode": metadata.get("billing_mode"),
         "unit": metadata.get("unit"),
         "unit_label": unit_label,
+        "plan": _copilot_plan(metadata, limit),
         "source_endpoint": metadata.get("source_endpoint"),
         "limit": limit,
         "limit_source": metadata.get("limit_source"),
@@ -420,6 +475,10 @@ def build_status():
         "is_over_budget": metrics["is_over_budget"],
         "projection": _calculate_projection(limit, usage_used, now.day, days_in_month, now),
         "top_models": _top_models(usage_items),
+        "cost_today": round(usage_amount_today, 2),
+        "cost_30d": round(usage_amount, 2),
+        "cost_window": "month",
+        "cost_30d_tokens": "{} {}".format(round(usage_used, 1), unit_label),
         "updated": _updated_text(now),
         "timestamp": now.isoformat(),
     }
