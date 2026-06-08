@@ -14,6 +14,7 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 ASSET_DIR="${REPO_DIR}/assets"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 PYTHON_BIN="${REPO_DIR}/venv/bin/python3"
+EXTENSION_NEEDS_RELOAD=0
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
     PYTHON_BIN="$(command -v python3)"
@@ -89,7 +90,7 @@ if uuid not in enabled:
 PY
     echo "Installed ${UUID} and added it to GNOME enabled-extensions."
     echo "Reload GNOME Shell to make it appear now: press Alt+F2, type r, press Enter."
-    exit 0
+    EXTENSION_NEEDS_RELOAD=1
 }
 
 if command -v systemctl >/dev/null 2>&1; then
@@ -120,3 +121,6 @@ fi
 
 echo "Installed and enabled ${UUID}."
 echo "QuotaHalo refresh timer and Copilot usage service are enabled."
+if [[ "${EXTENSION_NEEDS_RELOAD}" == "1" ]]; then
+    echo "Reload GNOME Shell to activate the newly installed extension."
+fi
