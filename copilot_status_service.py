@@ -50,6 +50,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class ProviderUnavailable(RuntimeError):
+    pass
+
+
 def _load_env():
     if load_dotenv:
         load_dotenv(PROJECT_DIR / ".env")
@@ -253,6 +257,8 @@ def _get_usage_for_month(token, username, year, month):
     headers["Authorization"] = f"Bearer {token}"
 
     response = _request_usage(AI_CREDIT_USAGE_URL.format(username), headers, params)
+    if response.status_code == 404:
+        raise ProviderUnavailable(_response_error(response, username))
     if response.status_code != 200:
         raise RuntimeError(_response_error(response, username))
 
@@ -417,13 +423,25 @@ def _error_payload(message):
     }
 
 
+def _missing_payload(message):
+    now = datetime.now()
+    return {
+        "provider": "GitHub Copilot",
+        "state": "missing",
+        "label": "Copilot --",
+        "error": message,
+        "updated": _updated_text(now),
+        "timestamp": now.isoformat(),
+    }
+
+
 def build_status():
     _load_env()
 
     token = os.getenv("GITHUB_TOKEN")
     username = os.getenv("GITHUB_USERNAME")
     if not token or not username:
-        raise RuntimeError("GITHUB_TOKEN or GITHUB_USERNAME not set")
+        raise ProviderUnavailable("GITHUB_TOKEN or GITHUB_USERNAME not set")
 
     now = datetime.now()
     now_utc = datetime.now(timezone.utc)
@@ -497,6 +515,9 @@ def build_status():
 def refresh_once():
     try:
         payload = build_status()
+    except ProviderUnavailable as exc:
+        logger.info("Copilot usage unavailable: %s", exc)
+        payload = _missing_payload(str(exc))
     except Exception as exc:
         logger.error("Failed to refresh Copilot usage: %s", exc)
         payload = _read_status()

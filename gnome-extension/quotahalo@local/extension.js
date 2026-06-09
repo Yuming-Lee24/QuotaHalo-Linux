@@ -438,7 +438,7 @@ function panelLabelText(status) {
 
 function hasClaudeProvider(status) {
     var claude = status && status.claude ? status.claude : null;
-    return !!(claude && claude.available);
+    return !!(claude && claude.available && hasClaudeQuota(claude));
 }
 
 function hasClaudeQuota(status) {
@@ -475,17 +475,14 @@ function copilotUsedPercent(status) {
 }
 
 function hasCopilotProvider(status) {
-    return !!(status && status.state !== 'missing');
+    return !!(status && status.state === 'ready' &&
+        status.pct_used !== undefined && status.pct_used !== null);
 }
 
 function copilotLabelText(status) {
     if (!hasCopilotProvider(status))
         return '';
-    if (status.state === 'error')
-        return '--';
-    if (status.pct_used !== undefined && status.pct_used !== null)
-        return String(Math.round(clampPercent(status.pct_used))) + '%';
-    return '--';
+    return String(Math.round(clampPercent(status.pct_used))) + '%';
 }
 
 function usageNumberText(value, status) {
@@ -1376,7 +1373,7 @@ QuotaHaloUsageIndicator.prototype = {
         var modelsText;
         var metaText;
 
-        if (!status || status.state === 'missing') {
+        if (!hasCopilotProvider(status)) {
             setItemVisible(this._copilotHeader.item, false);
             setItemVisible(this._copilotItem.item, false);
             setItemVisible(this._copilotUnavailableItem.item, false);
@@ -1496,7 +1493,7 @@ QuotaHaloUsageIndicator.prototype = {
     _setClaudeDetails: function(status) {
         var claude = status && status.claude ? status.claude : null;
 
-        if (!claude || !claude.available) {
+        if (!hasClaudeProvider(status)) {
             setItemVisible(this._claudeHeader.item, false);
             setItemVisible(this._claudeItem.item, false);
             setItemVisible(this._claudeWeeklyItem.item, false);

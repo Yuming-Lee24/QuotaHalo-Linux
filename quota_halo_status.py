@@ -1092,6 +1092,12 @@ def _provider_title(data):
     return title
 
 
+def _has_claude_quota(data):
+    if data.get("source") not in ("oauth", "cli"):
+        return False
+    return data.get("session_used_pct") is not None
+
+
 def _panel_status_payload(claude, codex):
     return {
         "label": _provider_label(codex),
@@ -1119,7 +1125,7 @@ def _panel_status_payload(claude, codex):
         "cost_window": "30d",
         "claude": {
             "provider": "Claude",
-            "available": bool(claude.get("installed", False)),
+            "available": _has_claude_quota(claude),
             "source": claude.get("source", "none"),
             "error": claude.get("error"),
             "updated": claude.get("updated", "Never"),
