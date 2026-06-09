@@ -65,6 +65,8 @@ schema = "org.gnome.shell"
 key = "enabled-extensions"
 
 raw = subprocess.check_output(["gsettings", "get", schema, key], text=True).strip()
+if raw.startswith("@as "):
+    raw = raw[4:].strip()
 enabled = ast.literal_eval(raw)
 next_enabled = [uuid for uuid in enabled if uuid not in uuids]
 if next_enabled != enabled:
@@ -83,6 +85,8 @@ schema = "org.gnome.shell"
 key = "enabled-extensions"
 
 raw = subprocess.check_output(["gsettings", "get", schema, key], text=True).strip()
+if raw.startswith("@as "):
+    raw = raw[4:].strip()
 enabled = ast.literal_eval(raw)
 if uuid not in enabled:
     enabled.append(uuid)
