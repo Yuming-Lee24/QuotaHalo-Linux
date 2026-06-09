@@ -413,11 +413,11 @@ function drawProgressBar(area, pctValue, provider, segments) {
 }
 
 function hasCodexProvider(status) {
-    return !!(status && status.provider === 'Codex' && status.available);
+    return hasCodexQuota(status);
 }
 
 function hasCodexQuota(status) {
-    if (!hasCodexProvider(status))
+    if (!status || status.provider !== 'Codex' || !status.available)
         return false;
     if (status.source === 'none' || status.source === 'config')
         return false;
@@ -1954,6 +1954,7 @@ QuotaHaloSystemIndicator.prototype = {
         box.add_child(keyLabel);
         box.add_child(valueLabel);
         this._box.add_child(box);
+        valueLabel.segment = box;
         return valueLabel;
     },
 
@@ -2411,11 +2412,13 @@ QuotaHaloSystemIndicator.prototype = {
         var gpu = this._readGpuPercent();
         var net = this._readNetworkRates();
         var badge;
+        var hasGpu = gpu.source !== 'unavailable';
 
         this._detectFlClash();
         this._cpuValue.set_text(pctText(cpu));
         this._memValue.set_text(pctText(mem.pct));
-        this._gpuValue.set_text(gpu.source === 'unavailable' ? unavailablePctText() : pctText(gpu.pct));
+        this._gpuValue.set_text(hasGpu ? pctText(gpu.pct) : unavailablePctText());
+        setItemVisible(this._gpuValue.segment, hasGpu);
         this._lastNet = net;
         this._updateNetworkLabel(net);
 
@@ -2435,11 +2438,12 @@ QuotaHaloSystemIndicator.prototype = {
             mem.pct,
             String(Math.round(clampPercent(mem.pct))) + '%',
             formatBytes(mem.used) + ' / ' + formatBytes(mem.total));
+        setItemVisible(this._gpuItem.item, hasGpu);
         this._setMetricDetailRow(
             this._gpuItem,
-            gpu.source === 'unavailable' ? 0 : gpu.pct,
-            gpu.source === 'unavailable' ? '--' : String(Math.round(clampPercent(gpu.pct))) + '%',
-            gpu.source === 'unavailable' ? 'Unavailable' : gpu.source);
+            hasGpu ? gpu.pct : 0,
+            hasGpu ? String(Math.round(clampPercent(gpu.pct))) + '%' : '--',
+            hasGpu ? gpu.source : 'Unavailable');
         this._netItem.valueLabel.set_text(
             '↓ ' + formatRate(net.rxRate) + '/s   ↑ ' + formatRate(net.txRate) + '/s');
         this._ifaceItem.valueLabel.set_text(

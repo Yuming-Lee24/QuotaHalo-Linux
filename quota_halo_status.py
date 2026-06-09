@@ -1092,6 +1092,12 @@ def _provider_title(data):
     return title
 
 
+def _has_codex_quota(data):
+    if data.get("source") != "sessions":
+        return False
+    return data.get("session_used_pct") is not None
+
+
 def _has_claude_quota(data):
     if data.get("source") not in ("oauth", "cli"):
         return False
@@ -1103,7 +1109,7 @@ def _panel_status_payload(claude, codex):
         "label": _provider_label(codex),
         "title": _provider_title(codex),
         "provider": "Codex",
-        "available": bool(codex.get("available", False)),
+        "available": _has_codex_quota(codex),
         "source": codex.get("source", "none"),
         "error": codex.get("error"),
         "updated": codex.get("updated", "Never"),
