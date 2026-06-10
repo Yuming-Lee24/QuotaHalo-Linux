@@ -76,10 +76,15 @@ var COPILOT_ICON_PATH = GLib.build_filenamev([Me.path, 'github-copilot-icon.png'
 var SYSTEM_UPDATE_SECONDS = 2;
 var USAGE_REFRESH_SECONDS = 30;
 var GPU_CACHE_USEC = 3 * 1000 * 1000;
-var FLCLASH_PROXY_URL = 'http://127.0.0.1:7890';
-var FLCLASH_IPINFO_URL = 'https://ipinfo.io/json';
-var FLCLASH_UPDATE_SECONDS = 60;
-var FLCLASH_INTERFACE_NAME = 'FlClash';
+var PROXY_IPINFO_URL = 'https://ipinfo.io/json';
+var PROXY_UPDATE_SECONDS = 60;
+var PROXY_CANDIDATES = [
+    { name: 'FlClash', url: 'http://127.0.0.1:7890', interfaceName: 'FlClash' },
+    { name: 'Clash/Mihomo', url: 'http://127.0.0.1:7890' },
+    { name: 'Clash Verge', url: 'http://127.0.0.1:7897' },
+    { name: 'Clash/Mihomo', url: 'http://127.0.0.1:7891' },
+    { name: 'Local proxy', url: 'http://127.0.0.1:8080' },
+];
 
 var usageIndicator = null;
 var systemIndicator = null;
@@ -1836,7 +1841,8 @@ QuotaHaloSystemIndicator.prototype = {
         this._flclashInfo = null;
         this._flclashError = null;
         this._flclashInfoLoading = false;
-        this._flclashAvailable = hasNetworkInterface(FLCLASH_INTERFACE_NAME);
+        this._flclashAvailable = false;
+        this._flclashProxy = null;
         this._lastNet = null;
 
         this._box = new St.BoxLayout({
@@ -1884,7 +1890,7 @@ QuotaHaloSystemIndicator.prototype = {
         this._ifaceItem = this._addSystemMetaItem('Interfaces', '--');
         this._flclashSeparator = new PopupMenu.PopupSeparatorMenuItem();
         this.menu.addMenuItem(this._flclashSeparator);
-        this._flclashIpItem = this._addSystemMetaItem('FlClash IP', '--');
+        this._flclashIpItem = this._addSystemMetaItem('Proxy IP', '--');
         this._flclashLocationItem = this._addSystemMetaItem('Location', '--');
         this._flclashOrgItem = this._addSystemMetaItem('Org', '--');
         this._flclashHostItem = this._addSystemMetaItem('Host', '--');
@@ -1929,7 +1935,7 @@ QuotaHaloSystemIndicator.prototype = {
             });
         this._flclashTimeoutId = GLib.timeout_add_seconds(
             GLib.PRIORITY_DEFAULT,
-            FLCLASH_UPDATE_SECONDS,
+            PROXY_UPDATE_SECONDS,
             function() {
                 self._loadFlClashInfo(false);
                 return true;
@@ -2234,6 +2240,12 @@ QuotaHaloSystemIndicator.prototype = {
         return (flag ? flag + ' ' : '') + code;
     },
 
+    _proxyText: function() {
+        if (!this._flclashProxy)
+            return 'detecting local proxy';
+        return this._flclashProxy.name + ' ' + this._flclashProxy.url;
+    },
+
     _setFlClashItemsVisible: function(visible) {
         var items = [
             this._flclashSeparator,
@@ -2256,18 +2268,7 @@ QuotaHaloSystemIndicator.prototype = {
     },
 
     _detectFlClash: function() {
-        var available = hasNetworkInterface(FLCLASH_INTERFACE_NAME);
-
-        if (available === this._flclashAvailable)
-            return available;
-        this._flclashAvailable = available;
-        if (!available) {
-            this._flclashInfo = null;
-            this._flclashError = null;
-            this._flclashInfoLoading = false;
-        }
-        this._renderFlClashInfo();
-        return available;
+        return this._flclashAvailable;
     },
 
     _updateNetworkLabel: function(net) {
@@ -2286,8 +2287,9 @@ QuotaHaloSystemIndicator.prototype = {
 
     _renderFlClashInfo: function() {
         var info = this._flclashInfo;
+        var proxyText = this._proxyText();
 
-        if (!this._flclashAvailable) {
+        if (!this._flclashAvailable && !this._flclashInfoLoading) {
             this._setFlClashItemsVisible(false);
             this._updateNetworkLabel();
             return;
@@ -2296,7 +2298,7 @@ QuotaHaloSystemIndicator.prototype = {
         this._updateNetworkLabel();
         if (this._flclashInfoLoading) {
             this._flclashIpItem.valueLabel.set_text('loading ipinfo.io...');
-            this._flclashLocationItem.valueLabel.set_text('Proxy ' + FLCLASH_PROXY_URL);
+            this._flclashLocationItem.valueLabel.set_text(proxyText);
             this._flclashOrgItem.valueLabel.set_text('--');
             this._flclashHostItem.valueLabel.set_text('--');
             this._flclashTzItem.valueLabel.set_text('--');
@@ -2304,7 +2306,7 @@ QuotaHaloSystemIndicator.prototype = {
         }
         if (this._flclashError) {
             this._flclashIpItem.valueLabel.set_text('unavailable');
-            this._flclashLocationItem.valueLabel.set_text('Proxy ' + FLCLASH_PROXY_URL);
+            this._flclashLocationItem.valueLabel.set_text(proxyText);
             this._flclashOrgItem.valueLabel.set_text(String(this._flclashError));
             this._flclashHostItem.valueLabel.set_text('--');
             this._flclashTzItem.valueLabel.set_text('--');
@@ -2312,7 +2314,7 @@ QuotaHaloSystemIndicator.prototype = {
         }
         if (!info) {
             this._flclashIpItem.valueLabel.set_text('click to load');
-            this._flclashLocationItem.valueLabel.set_text('Proxy ' + FLCLASH_PROXY_URL);
+            this._flclashLocationItem.valueLabel.set_text(proxyText);
             this._flclashOrgItem.valueLabel.set_text('--');
             this._flclashHostItem.valueLabel.set_text('--');
             this._flclashTzItem.valueLabel.set_text('--');
@@ -2327,28 +2329,47 @@ QuotaHaloSystemIndicator.prototype = {
     },
 
     _loadFlClashInfo: function(showLoading) {
-        var self = this;
-        var proc;
-
-        if (!this._detectFlClash())
-            return;
         if (this._flclashInfoLoading)
             return;
         this._flclashInfoLoading = true;
         this._flclashError = null;
+        this._flclashAvailable = true;
         if (showLoading || !this._flclashInfo)
             this._renderFlClashInfo();
+        this._loadProxyCandidate(0);
+    },
 
+    _loadProxyCandidate: function(index) {
+        var self = this;
+        var candidate;
+        var proc;
+
+        if (index >= PROXY_CANDIDATES.length) {
+            this._flclashAvailable = false;
+            this._flclashProxy = null;
+            this._flclashInfo = null;
+            this._flclashError = null;
+            this._flclashInfoLoading = false;
+            this._renderFlClashInfo();
+            return;
+        }
+        candidate = PROXY_CANDIDATES[index];
+        if (candidate.interfaceName && !hasNetworkInterface(candidate.interfaceName)) {
+            this._loadProxyCandidate(index + 1);
+            return;
+        }
         try {
             proc = Gio.Subprocess.new(
                 [
                     '/usr/bin/curl',
                     '-sS',
+                    '--connect-timeout',
+                    '2',
                     '--max-time',
-                    '8',
+                    '5',
                     '--proxy',
-                    FLCLASH_PROXY_URL,
-                    FLCLASH_IPINFO_URL,
+                    candidate.url,
+                    PROXY_IPINFO_URL,
                 ],
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
             proc.communicate_utf8_async(null, null, function(subprocess, res) {
@@ -2365,14 +2386,6 @@ QuotaHaloSystemIndicator.prototype = {
                     ok = result[0];
                     stdout = result[1] || '';
                     stderr = result[2] || '';
-                    if (!hasNetworkInterface(FLCLASH_INTERFACE_NAME)) {
-                        self._flclashAvailable = false;
-                        self._flclashInfo = null;
-                        self._flclashError = null;
-                        self._flclashInfoLoading = false;
-                        self._renderFlClashInfo();
-                        return;
-                    }
                     if (!ok || !subprocess.get_successful())
                         throw new Error(stderr || 'curl failed');
                     nextInfo = JSON.parse(stdout);
@@ -2381,6 +2394,8 @@ QuotaHaloSystemIndicator.prototype = {
                     nextIp = nextInfo && nextInfo.ip ? String(nextInfo.ip) : '';
                     if (!nextIp)
                         throw new Error('ipinfo response missing ip');
+                    self._flclashAvailable = true;
+                    self._flclashProxy = candidate;
                     if (nextIp !== currentIp) {
                         self._flclashInfo = nextInfo;
                         self._flclashInfoLoading = false;
@@ -2389,20 +2404,15 @@ QuotaHaloSystemIndicator.prototype = {
                         return;
                     }
                     self._flclashError = null;
-                } catch (e) {
-                    if (!self._flclashInfo)
-                        self._flclashError = String(e);
-                }
-                self._flclashInfoLoading = false;
-                if (!self._flclashInfo)
+                    self._flclashInfoLoading = false;
                     self._renderFlClashInfo();
+                } catch (e) {
+                    self._loadProxyCandidate(index + 1);
+                    return;
+                }
             });
         } catch (e) {
-            this._flclashInfoLoading = false;
-            if (!this._flclashInfo) {
-                this._flclashError = String(e);
-                this._renderFlClashInfo();
-            }
+            this._loadProxyCandidate(index + 1);
         }
     },
 
