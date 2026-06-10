@@ -326,13 +326,13 @@ class ClaudeDataFetcher:
             return True
         return False
 
-    def fetch_all(self):
+    def fetch_all(self, force=False):
         print("[QuotaHalo] Fetching real usage data...")
         got_usage = False
         used_usage_cache = False
         skip_cli_fallback = False
 
-        cached = self._load_usage_cache()
+        cached = None if force else self._load_usage_cache()
         if cached:
             self.data = cached
             got_usage = True
@@ -344,7 +344,7 @@ class ClaudeDataFetcher:
 
         # 1) Try OAuth usage endpoint from local Claude credentials.
         if not got_usage:
-            cred = self._fetch_oauth_api()
+            cred = self._fetch_oauth_api(force=force)
             if cred:
                 self.data = cred
                 got_usage = cred.get("source") == "oauth"
@@ -546,7 +546,7 @@ class ClaudeDataFetcher:
 
     _CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
 
-    def _fetch_oauth_api(self):
+    def _fetch_oauth_api(self, force=False):
         """Fetch Claude usage via the same OAuth endpoint used by Claude Code."""
         if not self._CREDS_PATH.exists():
             return None
@@ -563,7 +563,7 @@ class ClaudeDataFetcher:
             plan_local = self._format_plan(subscription or tier)
             print(f"    OAuth: credentials found, plan: {plan_local}", flush=True)
 
-            if self._oauth_backoff_active():
+            if not force and self._oauth_backoff_active():
                 print("    OAuth usage API: skipped during backoff", flush=True)
                 d = self._empty()
                 d["plan"] = plan_local
@@ -860,16 +860,13 @@ class CodexDataFetcher:
 
         latest_limits = None
         latest_limits_updated = None
-        latest_limits_score = (-1, -1, -1)
         for jf in jsonl_files:
             rate_limits = self._extract_rate_limits(jf)
             if rate_limits:
-                limits, updated, sort_key = rate_limits
-                score = self._rate_limit_score(limits, sort_key)
-                if score > latest_limits_score:
-                    latest_limits = limits
-                    latest_limits_updated = updated
-                    latest_limits_score = score
+                limits, updated, _sort_key = rate_limits
+                latest_limits = limits
+                latest_limits_updated = updated
+                break
 
         if latest_limits:
             rl = latest_limits
@@ -928,7 +925,6 @@ class CodexDataFetcher:
         best = None
         best_updated = None
         best_sort_key = -1
-        best_score = (-1, -1, -1)
         try:
             with open(jsonl_path, "r", encoding="utf-8", errors="ignore") as fh:
                 for line in fh:
@@ -943,12 +939,10 @@ class CodexDataFetcher:
                             if rl:
                                 updated, sort_key = CodexDataFetcher._format_event_time(
                                     e.get("timestamp"), jsonl_path)
-                                score = CodexDataFetcher._rate_limit_score(rl, sort_key)
-                                if score > best_score:
+                                if sort_key > best_sort_key:
                                     best = rl
                                     best_updated = updated
                                     best_sort_key = sort_key
-                                    best_score = score
                     except Exception:
                         pass
         except Exception:
@@ -956,19 +950,6 @@ class CodexDataFetcher:
         if not best:
             return None
         return best, best_updated, best_sort_key
-
-    @staticmethod
-    def _rate_limit_score(rate_limits, sort_key):
-        primary = rate_limits.get("primary", {}) if isinstance(rate_limits, dict) else {}
-        reset_at = primary.get("resets_at") or 0
-        used_pct = primary.get("used_percent", 0)
-        try:
-            reset_at = int(reset_at)
-        except Exception:
-            reset_at = 0
-        # Codex can emit the same window with resets_at differing by a second.
-        reset_bucket = reset_at // 60 if reset_at > 0 else 0
-        return (reset_bucket, _clamp_pct(used_pct), sort_key)
 
     @staticmethod
     def _to_epoch(value):
@@ -1174,12 +1155,12 @@ def _write_panel_status(claude, codex):
         print(f"[QuotaHalo] Status write err: {e}", flush=True)
 
 
-def refresh_once():
+def refresh_once(force=False):
     claude_fetcher = ClaudeDataFetcher()
     codex_fetcher = CodexDataFetcher()
 
     try:
-        claude_data = claude_fetcher.fetch_all()
+        claude_data = claude_fetcher.fetch_all(force=force)
     except Exception as e:
         print(f"[QuotaHalo] Claude refresh err: {e}", flush=True)
         claude_data = claude_fetcher.data
@@ -1198,7 +1179,7 @@ def refresh_once():
 
 if __name__ == '__main__':
     if '--refresh-once' in sys.argv:
-        refresh_once()
+        refresh_once(force='--force' in sys.argv)
         sys.exit(0)
     if '--cleanup-claude-usage-queries' in sys.argv:
         dry_run = '--dry-run' in sys.argv

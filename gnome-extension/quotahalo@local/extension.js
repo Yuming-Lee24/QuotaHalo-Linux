@@ -843,7 +843,7 @@ function addPanelPositionControl(menu, kind, callback) {
 }
 
 function addUsageActionsControl(menu, refreshCallback, positionCallback) {
-    var item = new PopupMenu.PopupBaseMenuItem({ reactive: false });
+    var item = new PopupMenu.PopupBaseMenuItem();
     var row = new St.BoxLayout({
         x_expand: true,
         y_align: Clutter.ActorAlign.CENTER,
@@ -1882,17 +1882,21 @@ QuotaHaloUsageIndicator.prototype = {
         var self = this;
         var proc;
         var startedAt = new Date().toISOString();
+        var command;
 
         manual = manual !== false;
         if (this._refreshing)
             return;
+        command = manual
+            ? [PYTHON_PATH, SCRIPT_PATH, '--refresh-once', '--force']
+            : [PYTHON_PATH, SCRIPT_PATH, '--refresh-once'];
 
         this._refreshing = true;
         writeRefreshDebug({
             state: 'started',
             manual: manual,
             startedAt: startedAt,
-            command: [PYTHON_PATH, SCRIPT_PATH, '--refresh-once'],
+            command: command,
         });
         if (manual)
             setButtonEnabled(this._refreshItem, false);
@@ -1901,7 +1905,7 @@ QuotaHaloUsageIndicator.prototype = {
 
         try {
             proc = Gio.Subprocess.new(
-                [PYTHON_PATH, SCRIPT_PATH, '--refresh-once'],
+                command,
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
             proc.communicate_utf8_async(null, null, function(subprocess, res) {
                 var ok = false;
@@ -1953,6 +1957,7 @@ QuotaHaloUsageIndicator.prototype = {
     },
 
     _requestCopilotRefresh: function() {
+        var self = this;
         var proc;
 
         try {
@@ -1965,6 +1970,7 @@ QuotaHaloUsageIndicator.prototype = {
                 } catch (e) {
                     log('quotahalo copilot refresh failed: ' + e);
                 }
+                self._update();
             });
         } catch (e) {
             log('quotahalo copilot refresh spawn failed: ' + e);
