@@ -246,15 +246,37 @@
   text-align: right;
 }
 
-.quotahalo-refresh-item {
-  margin: 6px 8px 8px;
-  border-radius: 8px;
-  color: rgba(94, 234, 212, 0.98);
-  font-weight: 600;
+.quotahalo-position-item,
+.quotahalo-actions-item {
+  padding: 7px 14px 9px;
 }
 
-.quotahalo-refresh-item:hover {
-  background-color: rgba(45, 212, 191, 0.14);
+.quotahalo-position-row,
+.quotahalo-actions-row {
+  spacing: 12px;
+}
+
+.quotahalo-position-option,
+.quotahalo-action-button {
+  min-width: 118px;
+  min-height: 24px;
+  border-radius: 5px;
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: rgba(203, 213, 225, 0.92);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.quotahalo-refresh-button {
+  color: rgba(94, 234, 212, 0.98);
+}
+
+.quotahalo-position-option:hover,
+.quotahalo-action-button:hover {
+  background-color: rgba(45, 212, 191, 0.16);
+  border-color: rgba(94, 234, 212, 0.24);
+  color: rgba(240, 253, 250, 0.98);
 }
 
 .quotahalo-system-container {

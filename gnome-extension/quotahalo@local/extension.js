@@ -28,6 +28,11 @@ function readInstallConfig() {
 var INSTALL_CONFIG = readInstallConfig();
 var PYTHON_PATH = INSTALL_CONFIG.python_bin || '/usr/bin/python3';
 
+var CACHE_DIR = GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '.cache',
+    'quotahalo',
+]);
 var LABEL_PATH = GLib.build_filenamev([
     GLib.get_home_dir(),
     '.cache',
@@ -57,6 +62,10 @@ var REFRESH_DEBUG_PATH = GLib.build_filenamev([
     '.cache',
     'quotahalo',
     'extension-refresh-debug.json',
+]);
+var PANEL_LAYOUT_PATH = GLib.build_filenamev([
+    CACHE_DIR,
+    'panel-layout.json',
 ]);
 var SCRIPT_PATH = INSTALL_CONFIG.status_script || GLib.build_filenamev([
     GLib.get_home_dir(),
@@ -663,6 +672,238 @@ function writeRefreshDebug(payload) {
     }
 }
 
+function normalizePanelPosition(value, fallback) {
+    if (value === 'left' || value === 'right')
+        return value;
+    return fallback;
+}
+
+function readPanelLayout() {
+    var layout = { usage: 'right', system: 'left' };
+    var result;
+    var raw;
+    var parsed;
+
+    try {
+        result = GLib.file_get_contents(PANEL_LAYOUT_PATH);
+        if (!result[0])
+            return layout;
+        raw = ByteArray.toString(result[1]);
+        parsed = JSON.parse(raw);
+        layout.usage = normalizePanelPosition(parsed.usage, layout.usage);
+        layout.system = normalizePanelPosition(parsed.system, layout.system);
+    } catch (e) {
+    }
+    return layout;
+}
+
+function writePanelLayout(layout) {
+    try {
+        GLib.mkdir_with_parents(CACHE_DIR, 448);
+        GLib.file_set_contents(PANEL_LAYOUT_PATH, JSON.stringify({
+            usage: normalizePanelPosition(layout.usage, 'right'),
+            system: normalizePanelPosition(layout.system, 'left'),
+        }, null, 2) + '\n');
+    } catch (e) {
+        log('quotahalo layout write failed: ' + e);
+    }
+}
+
+function panelPosition(kind) {
+    var layout = readPanelLayout();
+
+    if (kind === 'system')
+        return normalizePanelPosition(layout.system, 'left');
+    return normalizePanelPosition(layout.usage, 'right');
+}
+
+function setPanelPosition(kind, position) {
+    var layout = readPanelLayout();
+
+    if (kind === 'system')
+        layout.system = normalizePanelPosition(position, 'left');
+    else
+        layout.usage = normalizePanelPosition(position, 'right');
+    writePanelLayout(layout);
+}
+
+function panelBoxForPosition(position) {
+    return position === 'left' ? Main.panel._leftBox : Main.panel._rightBox;
+}
+
+function movePanelActor(actor, position) {
+    var box = panelBoxForPosition(position);
+    var parent;
+    var index;
+
+    if (!actor || !box)
+        return;
+    parent = actor.get_parent ? actor.get_parent() : null;
+    if (parent && parent.remove_child)
+        parent.remove_child(actor);
+    index = position === 'left' && box.get_children ? box.get_children().length : 0;
+    box.insert_child_at_index(actor, index);
+}
+
+function removeActorChildren(actor) {
+    var children;
+    var i;
+
+    if (!actor || !actor.get_children || !actor.remove_child)
+        return;
+    children = actor.get_children();
+    for (i = 0; i < children.length; i++)
+        actor.remove_child(children[i]);
+}
+
+function setButtonLabel(button, text) {
+    if (!button)
+        return;
+    if (button.set_label)
+        button.set_label(text);
+    else
+        button.label = text;
+}
+
+function setButtonEnabled(button, enabled) {
+    if (!button)
+        return;
+    if (button.set_reactive)
+        button.set_reactive(enabled);
+    else
+        button.reactive = enabled;
+    button.can_focus = enabled;
+    button.opacity = enabled ? 255 : 150;
+}
+
+function makeActionButton(label, styleClass) {
+    return new St.Button({
+        label: label,
+        can_focus: true,
+        reactive: true,
+        track_hover: true,
+        y_align: Clutter.ActorAlign.CENTER,
+        style_class: styleClass,
+    });
+}
+
+function makePositionButton(label) {
+    return makeActionButton(label, 'quotahalo-position-option');
+}
+
+function addPanelPositionControl(menu, kind, callback) {
+    var item = new PopupMenu.PopupBaseMenuItem({ reactive: false });
+    var row = new St.BoxLayout({
+        x_expand: true,
+        y_align: Clutter.ActorAlign.CENTER,
+        style_class: 'quotahalo-position-row',
+    });
+    var spacer = new St.Widget({
+        x_expand: true,
+        y_align: Clutter.ActorAlign.CENTER,
+    });
+    var control;
+    var button = makePositionButton('');
+
+    function render(position) {
+        position = normalizePanelPosition(position, panelPosition(kind));
+        removeActorChildren(row);
+        if (position === 'left') {
+            setButtonLabel(button, 'Switch to Right');
+            row.add_child(spacer);
+            row.add_child(button);
+        } else {
+            setButtonLabel(button, 'Switch to Left');
+            row.add_child(button);
+            row.add_child(spacer);
+        }
+    }
+
+    function apply(position) {
+        position = normalizePanelPosition(position, panelPosition(kind));
+        setPanelPosition(kind, position);
+        render(position);
+        if (callback)
+            callback(position);
+    }
+
+    control = {
+        item: item,
+        button: button,
+    };
+    addItemStyle(item, 'quotahalo-position-item');
+    button.connect('clicked', function() {
+        var current = panelPosition(kind);
+        apply(current === 'left' ? 'right' : 'left');
+    });
+    item.add_child(row);
+    menu.addMenuItem(item);
+    render(panelPosition(kind));
+    return control;
+}
+
+function addUsageActionsControl(menu, refreshCallback, positionCallback) {
+    var item = new PopupMenu.PopupBaseMenuItem({ reactive: false });
+    var row = new St.BoxLayout({
+        x_expand: true,
+        y_align: Clutter.ActorAlign.CENTER,
+        style_class: 'quotahalo-actions-row',
+    });
+    var spacer = new St.Widget({
+        x_expand: true,
+        y_align: Clutter.ActorAlign.CENTER,
+    });
+    var refreshButton = makeActionButton('Refresh now', 'quotahalo-action-button quotahalo-refresh-button');
+    var positionButton = makeActionButton('', 'quotahalo-action-button quotahalo-position-option');
+    var control;
+
+    function render(position) {
+        position = normalizePanelPosition(position, panelPosition('usage'));
+        removeActorChildren(row);
+        if (position === 'left') {
+            setButtonLabel(positionButton, 'Switch to Right');
+            row.add_child(refreshButton);
+            row.add_child(spacer);
+            row.add_child(positionButton);
+        } else {
+            setButtonLabel(positionButton, 'Switch to Left');
+            row.add_child(positionButton);
+            row.add_child(spacer);
+            row.add_child(refreshButton);
+        }
+    }
+
+    function apply(position) {
+        position = normalizePanelPosition(position, panelPosition('usage'));
+        setPanelPosition('usage', position);
+        render(position);
+        if (positionCallback)
+            positionCallback(position);
+    }
+
+    control = {
+        item: item,
+        refreshButton: refreshButton,
+        positionButton: positionButton,
+        render: render,
+        refreshClickedId: 0,
+        positionClickedId: 0,
+    };
+    addItemStyle(item, 'quotahalo-actions-item');
+    control.refreshClickedId = refreshButton.connect('clicked', function() {
+        if (refreshCallback)
+            refreshCallback();
+    });
+    control.positionClickedId = positionButton.connect('clicked', function() {
+        var current = panelPosition('usage');
+        apply(current === 'left' ? 'right' : 'left');
+    });
+    item.add_child(row);
+    menu.addMenuItem(item);
+    render(panelPosition('usage'));
+    return control;
+}
+
 function readTextFile(path) {
     try {
         var result = GLib.file_get_contents(path);
@@ -882,10 +1123,6 @@ function QuotaHaloUsageIndicator() {
 QuotaHaloUsageIndicator.prototype = {
     _init: function() {
         var self = this;
-        var anchor;
-        var anchorIndex;
-        var panelBox;
-        var children;
         var status = readStatus();
         var copilotStatus = readCopilotStatus();
 
@@ -895,7 +1132,6 @@ QuotaHaloUsageIndicator.prototype = {
         this._openChangedId = 0;
         this._buttonPressId = 0;
         this._keyPressId = 0;
-        this._refreshActivatedId = 0;
         this._refreshing = false;
         this._copilotLabel = new St.Label({
             text: copilotLabelText(copilotStatus),
@@ -1081,9 +1317,16 @@ QuotaHaloUsageIndicator.prototype = {
         this._claudeSeparator = new PopupMenu.PopupSeparatorMenuItem();
         this.menu.addMenuItem(this._claudeSeparator);
 
-        this._refreshItem = new PopupMenu.PopupMenuItem('Refresh now');
-        addItemStyle(this._refreshItem, 'quotahalo-refresh-item');
-        this.menu.addMenuItem(this._refreshItem);
+        this._actionsControl = addUsageActionsControl(this.menu, function() {
+            if (!self._refreshing) {
+                self._requestCopilotRefresh();
+                self._requestRefresh(true);
+            }
+        }, function(position) {
+            movePanelActor(self._button, position);
+            self._writeDebug('layout');
+        });
+        this._refreshItem = this._actionsControl.refreshButton;
 
         this._openChangedId = this.menu.connect('open-state-changed', function(menu, open) {
             if (open)
@@ -1105,21 +1348,9 @@ QuotaHaloUsageIndicator.prototype = {
             }
             return Clutter.EVENT_PROPAGATE;
         });
-        this._refreshActivatedId = this._refreshItem.connect('activate', function() {
-            if (!self._refreshing) {
-                self._requestCopilotRefresh();
-                self._requestRefresh(true);
-            }
-        });
-
-        panelBox = Main.panel._rightBox;
         this._centerBox = Main.panel._centerBox;
-        this._rightBox = panelBox;
-        children = this._rightBox.get_children();
-        anchor = Main.panel.statusArea.dateMenu;
-        this._sibling = anchor ? (anchor.container || anchor.actor || null) : null;
-        anchorIndex = -1;
-        this._rightBox.insert_child_at_index(this._button, 0);
+        this._sibling = null;
+        movePanelActor(this._button, panelPosition('usage'));
 
         Main.panel.statusArea['quotahalo-usage'] = this;
         this._writeDebug('init');
@@ -1663,10 +1894,10 @@ QuotaHaloUsageIndicator.prototype = {
             startedAt: startedAt,
             command: [PYTHON_PATH, SCRIPT_PATH, '--refresh-once'],
         });
-        if (manual && this._refreshItem.setSensitive)
-            this._refreshItem.setSensitive(false);
         if (manual)
-            this._refreshItem.label.set_text('Refreshing...');
+            setButtonEnabled(this._refreshItem, false);
+        if (manual)
+            setButtonLabel(this._refreshItem, 'Refreshing...');
 
         try {
             proc = Gio.Subprocess.new(
@@ -1698,10 +1929,10 @@ QuotaHaloUsageIndicator.prototype = {
                     stderrTail: stderr.slice(-4000),
                 });
                 self._refreshing = false;
-                if (manual && self._refreshItem.setSensitive)
-                    self._refreshItem.setSensitive(true);
                 if (manual)
-                    self._refreshItem.label.set_text('Refresh now');
+                    setButtonEnabled(self._refreshItem, true);
+                if (manual)
+                    setButtonLabel(self._refreshItem, 'Refresh now');
                 self._update();
             });
         } catch (e) {
@@ -1714,10 +1945,10 @@ QuotaHaloUsageIndicator.prototype = {
                 error: String(e),
             });
             this._refreshing = false;
-            if (manual && this._refreshItem.setSensitive)
-                this._refreshItem.setSensitive(true);
             if (manual)
-                this._refreshItem.label.set_text('Refresh now');
+                setButtonEnabled(this._refreshItem, true);
+            if (manual)
+                setButtonLabel(this._refreshItem, 'Refresh now');
         }
     },
 
@@ -1774,19 +2005,26 @@ QuotaHaloUsageIndicator.prototype = {
         setItemVisible(this._copilotSeparator, showCopilot);
         setItemVisible(this._codexSeparator, showCodex);
         setItemVisible(this._claudeSeparator, showClaude);
-        setItemVisible(this._refreshItem, footerVisible);
+        setItemVisible(this._actionsControl.item, footerVisible);
+        this._actionsControl.render(panelPosition('usage'));
 
         if (!this._refreshing)
-            this._refreshItem.label.set_text('Refresh now');
+            setButtonLabel(this._refreshItem, 'Refresh now');
         return true;
     },
 
     destroy: function() {
         if (Main.panel.statusArea['quotahalo-usage'] === this)
             delete Main.panel.statusArea['quotahalo-usage'];
-        if (this._refreshActivatedId) {
-            this._refreshItem.disconnect(this._refreshActivatedId);
-            this._refreshActivatedId = 0;
+        if (this._actionsControl) {
+            if (this._actionsControl.refreshClickedId) {
+                this._actionsControl.refreshButton.disconnect(this._actionsControl.refreshClickedId);
+                this._actionsControl.refreshClickedId = 0;
+            }
+            if (this._actionsControl.positionClickedId) {
+                this._actionsControl.positionButton.disconnect(this._actionsControl.positionClickedId);
+                this._actionsControl.positionClickedId = 0;
+            }
         }
         if (this._keyPressId) {
             this._button.disconnect(this._keyPressId);
@@ -1827,7 +2065,6 @@ function QuotaHaloSystemIndicator() {
 QuotaHaloSystemIndicator.prototype = {
     _init: function() {
         var self = this;
-        var children;
 
         this._timeoutId = 0;
         this._flclashTimeoutId = 0;
@@ -1895,6 +2132,11 @@ QuotaHaloSystemIndicator.prototype = {
         this._flclashOrgItem = this._addSystemMetaItem('Org', '--');
         this._flclashHostItem = this._addSystemMetaItem('Host', '--');
         this._flclashTzItem = this._addSystemMetaItem('Timezone', '--');
+        this._layoutSeparator = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._layoutSeparator);
+        this._positionControl = addPanelPositionControl(this.menu, 'system', function(position) {
+            movePanelActor(self._button, position);
+        });
         this._renderFlClashInfo();
 
         this._openChangedId = this.menu.connect('open-state-changed', function(menu, open) {
@@ -1920,9 +2162,7 @@ QuotaHaloSystemIndicator.prototype = {
             return Clutter.EVENT_PROPAGATE;
         });
 
-        this._leftBox = Main.panel._leftBox;
-        children = this._leftBox.get_children();
-        this._leftBox.insert_child_at_index(this._button, children.length);
+        movePanelActor(this._button, panelPosition('system'));
 
         Main.panel.statusArea['quotahalo-system'] = this;
         this._update();
