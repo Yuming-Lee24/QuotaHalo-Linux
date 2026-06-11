@@ -670,6 +670,39 @@ function claudeWeeklyUsedPercent(status) {
     return usedPercent(claude, 'weekly_used_pct');
 }
 
+// Time left in a provider's current 5-hour usage session, e.g. "42m"/"1h05m".
+// Computed live from session_reset_epoch so the pill counts down every tick.
+function formatResetCountdown(epoch) {
+    var secs;
+    var h;
+    var m;
+
+    if (!epoch)
+        return '';
+    secs = epoch - Date.now() / 1000;
+    if (secs <= 0)
+        return '';
+    h = Math.floor(secs / 3600);
+    m = Math.floor((secs % 3600) / 60);
+    if (h > 0)
+        return h + 'h' + (m < 10 ? '0' + m : m) + 'm';
+    return m + 'm';
+}
+
+function claudeSessionResetText(status) {
+    var claude = status && status.claude ? status.claude : null;
+
+    if (!hasClaudeProvider(status) || !hasClaudeQuota(claude))
+        return '';
+    return formatResetCountdown(resetEpochFor(claude, 'session_used_pct'));
+}
+
+function codexSessionResetText(status) {
+    if (!hasCodexProvider(status) || !hasCodexQuota(status))
+        return '';
+    return formatResetCountdown(resetEpochFor(status, 'session_used_pct'));
+}
+
 function copilotUsedPercent(status) {
     if (!status || status.state === 'missing' || status.state === 'error')
         return 0;
@@ -1337,10 +1370,20 @@ QuotaHaloUsageIndicator.prototype = {
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'quotahalo-usage-label',
         });
+        this._codexResetLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-codex-reset-label',
+        });
         this._claudeLabel = new St.Label({
             text: '',
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'quotahalo-claude-label',
+        });
+        this._claudeResetLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-claude-reset-label',
         });
         this._sessionDot = new St.DrawingArea({
             width: 22,
@@ -1472,8 +1515,10 @@ QuotaHaloUsageIndicator.prototype = {
         this._box.add_child(this._copilotLabel);
         this._box.add_child(this._ringWrap);
         this._box.add_child(this._label);
+        this._box.add_child(this._codexResetLabel);
         this._box.add_child(this._claudeWrap);
         this._box.add_child(this._claudeLabel);
+        this._box.add_child(this._claudeResetLabel);
         this._box.add_child(this._sessionDot);
         this._setCopilotLabel(copilotStatus);
         this._setCodexLabel(status);
@@ -1934,6 +1979,26 @@ QuotaHaloUsageIndicator.prototype = {
             this._claudeWrap.hide();
             this._claudeLabel.hide();
         }
+    },
+
+    _setClaudeReset: function(status) {
+        var text = claudeSessionResetText(status);
+
+        this._claudeResetLabel.set_text(text);
+        if (text)
+            this._claudeResetLabel.show();
+        else
+            this._claudeResetLabel.hide();
+    },
+
+    _setCodexReset: function(status) {
+        var text = codexSessionResetText(status);
+
+        this._codexResetLabel.set_text(text);
+        if (text)
+            this._codexResetLabel.show();
+        else
+            this._codexResetLabel.hide();
     },
 
     _setClaudeDetails: function(status) {
@@ -2406,7 +2471,9 @@ QuotaHaloUsageIndicator.prototype = {
 
         this._setCopilotLabel(copilotStatus);
         this._setCodexLabel(status);
+        this._setCodexReset(status);
         this._setClaudeLabel(status);
+        this._setClaudeReset(status);
         this._copilotPct = copilotUsedPercent(copilotStatus);
         this._weeklyPct = usedPercent(status, 'weekly_used_pct');
         this._claudeWeeklyPct = claudeWeeklyUsedPercent(status);
