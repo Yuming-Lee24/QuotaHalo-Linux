@@ -3,5 +3,5 @@
   "name": "QuotaHalo Usage",
   "description": "Shows Copilot, Codex, Claude, and system usage in the GNOME top bar.",
   "shell-version": ["40", "41", "42", "43", "44"],
-  "version": 1
+  "version": 2
 }
