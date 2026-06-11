@@ -247,6 +247,33 @@ function findWindowByTitle(needle) {
     return null;
 }
 
+// Fallback: focus a window owned by one of the session's ancestor processes
+// (its terminal). Exact for per-window terminals; for gnome-terminal's shared
+// server pid it brings a gnome-terminal window to the front.
+function findWindowByPids(pids) {
+    var set = {};
+    var actors;
+    var i;
+    var win;
+    var pid;
+
+    if (!pids || !pids.length)
+        return null;
+    for (i = 0; i < pids.length; i++)
+        set[String(pids[i])] = true;
+    actors = global.get_window_actors();
+    for (i = 0; i < actors.length; i++) {
+        win = actors[i].meta_window ||
+            (actors[i].get_meta_window ? actors[i].get_meta_window() : null);
+        if (!win || !win.get_pid)
+            continue;
+        pid = win.get_pid();
+        if (pid && set[String(pid)])
+            return win;
+    }
+    return null;
+}
+
 function readSessions() {
     var sessions = [];
     var now = sessionsNowEpoch();
@@ -2322,21 +2349,21 @@ QuotaHaloUsageIndicator.prototype = {
             project = String(s.project || 'Claude Code');
             matchKey = s.title || s.project;
             if (prev === 'working' && s.state === 'needs_input')
-                this._notify('Claude needs you', project + ' — needs your input', matchKey);
+                this._notify('Claude needs you', project + ' — needs your input', matchKey, s.ancestor_pids);
             else if (prev === 'working' && s.state === 'awaiting_reply')
-                this._notify('Claude finished', project + ' — your turn to reply', matchKey);
+                this._notify('Claude finished', project + ' — your turn to reply', matchKey, s.ancestor_pids);
         }
         this._sessionStates = current;
     },
 
-    _focusSessionWindow: function(matchKey) {
-        var win = findWindowByTitle(matchKey);
+    _focusSessionWindow: function(matchKey, pids) {
+        var win = findWindowByTitle(matchKey) || findWindowByPids(pids);
 
         if (win)
             Main.activateWindow(win);
     },
 
-    _notify: function(title, body, matchKey) {
+    _notify: function(title, body, matchKey, pids) {
         var self = this;
         var source = this._notifSource;
         var gicon = null;
@@ -2355,10 +2382,10 @@ QuotaHaloUsageIndicator.prototype = {
                 gicon = new Gio.FileIcon({ file: Gio.File.new_for_path(CLAUDE_ICON_PATH) });
             notification = new MessageTray.Notification(source, title, body, { gicon: gicon });
             notification.setTransient(false);
-            if (matchKey) {
+            if (matchKey || (pids && pids.length)) {
                 // Clicking the notification focuses that session's terminal window.
                 notification.connect('activated', function() {
-                    self._focusSessionWindow(matchKey);
+                    self._focusSessionWindow(matchKey, pids);
                 });
             }
             source.showNotification(notification);

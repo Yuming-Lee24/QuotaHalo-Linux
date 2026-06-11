@@ -260,6 +260,20 @@ class SessionHookTests(unittest.TestCase):
         chs._prune_and_reconcile(now)
         self.assertFalse((chs.SESSIONS_DIR / "C.json").exists())
 
+    def test_records_ancestor_pids_for_window_focus(self):
+        import os
+        cs = Path(self._tmp.name) / "cs"
+        cs.mkdir()
+        chs.CLAUDE_SESSIONS_DIR = cs
+        mypid = os.getpid()
+        (cs / (str(mypid) + ".json")).write_text(json.dumps(
+            {"sessionId": "P", "updatedAt": 1}), encoding="utf-8")
+        chs.handle_event({"hook_event_name": "SessionStart", "session_id": "P",
+                          "cwd": "/tmp/p"}, now=10)
+        rec = self._read("P")
+        self.assertIn("ancestor_pids", rec)
+        self.assertIn(mypid, rec["ancestor_pids"])  # chain starts at this process
+
     def test_no_session_id_is_noop(self):
         self.assertIsNone(chs.handle_event({}, now=1))
         self.assertIsNone(chs.handle_event({"hook_event_name": "Stop"}, now=1))
