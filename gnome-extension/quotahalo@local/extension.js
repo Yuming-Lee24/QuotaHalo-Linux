@@ -1291,7 +1291,7 @@ QuotaHaloUsageIndicator.prototype = {
             style_class: 'quotahalo-claude-label',
         });
         this._sessionDot = new St.DrawingArea({
-            width: 12,
+            width: 22,
             height: 24,
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'quotahalo-session-dot',
@@ -2139,6 +2139,7 @@ QuotaHaloUsageIndicator.prototype = {
         var alloc = area.get_allocation_box();
         var width = alloc.x2 - alloc.x1;
         var height = alloc.y2 - alloc.y1;
+        var radius = Math.min(9, Math.min(width, height) / 2);
         var color;
         var cr;
 
@@ -2147,7 +2148,7 @@ QuotaHaloUsageIndicator.prototype = {
         color = sessionDotColor(this._sessionDotState);
         cr = area.get_context();
         cr.setSourceRGBA(color[0], color[1], color[2], color[3]);
-        cr.arc(width / 2, height / 2, 4, 0, Math.PI * 2);
+        cr.arc(width / 2, height / 2, radius, 0, Math.PI * 2);
         cr.fill();
         cr.$dispose();
     },
