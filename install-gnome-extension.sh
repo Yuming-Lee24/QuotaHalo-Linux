@@ -51,6 +51,21 @@ payload = {
 config_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
 PY
 
+# Register the Claude Code session-status hooks (writes ~/.claude/settings.json).
+# The hook command runs under /usr/bin/python3 (fast, stdlib-only); fall back to
+# the resolved PYTHON_BIN only if the system python is missing.
+if [[ -d "${HOME}/.claude" ]]; then
+    HOOK_PYTHON="/usr/bin/python3"
+    [[ -x "${HOOK_PYTHON}" ]] || HOOK_PYTHON="${PYTHON_BIN}"
+    if python3 "${REPO_DIR}/install_hooks.py" --install "${REPO_DIR}" --python "${HOOK_PYTHON}"; then
+        :
+    else
+        echo "WARN: could not register Claude Code session hooks in ~/.claude/settings.json."
+    fi
+else
+    echo "Skipping Claude Code session hooks: ~/.claude not found (install Claude Code first, then rerun)."
+fi
+
 gsettings set org.gnome.shell disable-user-extensions false || true
 for legacy_uuid in "${LEGACY_EXTENSIONS[@]}"; do
     gnome-extensions disable "${legacy_uuid}" >/dev/null 2>&1 || true
@@ -125,6 +140,10 @@ fi
 
 echo "Installed and enabled ${UUID}."
 echo "QuotaHalo refresh timer and Copilot usage service are enabled."
+echo "Claude Code session status: hooks registered in ~/.claude/settings.json."
+echo "  Remove them later with: python3 \"${REPO_DIR}/install_hooks.py\" --uninstall"
 if [[ "${EXTENSION_NEEDS_RELOAD}" == "1" ]]; then
     echo "Reload GNOME Shell to activate the newly installed extension."
 fi
+echo "If the top bar stays empty after a reload, run:"
+echo "  gnome-extensions disable ${UUID} && gnome-extensions enable ${UUID}"

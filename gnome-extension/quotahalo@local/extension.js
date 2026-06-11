@@ -7,6 +7,7 @@ var St = imports.gi.St;
 
 var ExtensionUtils = imports.misc.extensionUtils;
 var Main = imports.ui.main;
+var MessageTray = imports.ui.messageTray;
 var PopupMenu = imports.ui.popupMenu;
 var Me = ExtensionUtils.getCurrentExtension();
 
@@ -45,6 +46,22 @@ var JSON_PATH = GLib.build_filenamev([
     'quotahalo',
     'usage-status.json',
 ]);
+var SESSIONS_DIR = GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '.cache',
+    'quotahalo',
+    'sessions',
+]);
+// Hide a Claude Code session whose last event is older than this (seconds).
+// Mirrors STALE_SECONDS in claude_session_hook.py: a long tool run can stay
+// quiet, so "working" gets the longest leash; idle/waiting are reaped sooner.
+var SESSION_STALE_SECONDS = {
+    working: 6 * 3600,
+    needs_input: 3 * 3600,
+    awaiting_reply: 2 * 3600,
+    idle: 2 * 3600,
+};
+var SESSION_DEFAULT_STALE_SECONDS = 2 * 3600;
 var COPILOT_JSON_PATH = GLib.build_filenamev([
     GLib.get_home_dir(),
     '.cache',
@@ -152,6 +169,125 @@ function readCopilotStatus() {
     } catch (e) {
         return fallbackCopilotStatus();
     }
+}
+
+function sessionsNowEpoch() {
+    return GLib.get_real_time() / 1000000;
+}
+
+function sessionStatePriority(state) {
+    if (state === 'needs_input')
+        return 4;
+    if (state === 'working')
+        return 3;
+    if (state === 'awaiting_reply')
+        return 2;
+    if (state === 'idle')
+        return 1;
+    return 0;
+}
+
+function sessionDotColor(state) {
+    if (state === 'needs_input')
+        return [0.91, 0.66, 0.24, 1.0];   // amber — blocked on you
+    if (state === 'working')
+        return [0.13, 0.77, 0.55, 1.0];   // green — working
+    if (state === 'awaiting_reply')
+        return [0.34, 0.62, 0.96, 1.0];   // blue — your turn
+    return [0.58, 0.64, 0.72, 1.0];       // grey — idle / away
+}
+
+function sessionStateLabel(state) {
+    if (state === 'needs_input')
+        return 'Needs input';
+    if (state === 'working')
+        return 'Working';
+    if (state === 'awaiting_reply')
+        return 'Awaiting reply';
+    if (state === 'idle')
+        return 'Idle (away)';
+    return state || 'Unknown';
+}
+
+function compactAgo(epoch) {
+    var now = sessionsNowEpoch();
+    var secs = Math.max(0, Math.round(now - (Number(epoch) || now)));
+
+    if (secs < 60)
+        return secs + 's';
+    if (secs < 3600)
+        return Math.round(secs / 60) + 'm';
+    if (secs < 86400)
+        return Math.round(secs / 3600) + 'h';
+    return Math.round(secs / 86400) + 'd';
+}
+
+function readSessions() {
+    var sessions = [];
+    var now = sessionsNowEpoch();
+    var enumerator;
+    var info;
+    var name;
+    var path;
+    var result;
+    var data;
+    var state;
+    var updated;
+    var limit;
+
+    try {
+        enumerator = Gio.File.new_for_path(SESSIONS_DIR).enumerate_children(
+            'standard::name', Gio.FileQueryInfoFlags.NONE, null);
+    } catch (e) {
+        return sessions;
+    }
+    while ((info = enumerator.next_file(null)) !== null) {
+        name = info.get_name();
+        if (name.slice(-5) !== '.json')
+            continue;
+        try {
+            path = GLib.build_filenamev([SESSIONS_DIR, name]);
+            result = GLib.file_get_contents(path);
+            if (!result[0])
+                continue;
+            data = JSON.parse(ByteArray.toString(result[1]));
+        } catch (e) {
+            continue;
+        }
+        if (!data || !data.state)
+            continue;
+        state = String(data.state);
+        updated = Number(data.updated_epoch) || 0;
+        limit = SESSION_STALE_SECONDS[state] || SESSION_DEFAULT_STALE_SECONDS;
+        if (updated <= 0 || now - updated > limit)
+            continue;
+        sessions.push(data);
+    }
+    enumerator.close(null);
+    sessions.sort(function(a, b) {
+        var pa = sessionStatePriority(a.state);
+        var pb = sessionStatePriority(b.state);
+        if (pa !== pb)
+            return pb - pa;
+        return (Number(b.updated_epoch) || 0) - (Number(a.updated_epoch) || 0);
+    });
+    return sessions;
+}
+
+function aggregateSessionState(sessions) {
+    var best = null;
+    var bestPriority = 0;
+    var i;
+    var priority;
+
+    for (i = 0; i < sessions.length; i++) {
+        priority = sessionStatePriority(sessions[i].state);
+        if (priority > bestPriority) {
+            bestPriority = priority;
+            best = sessions[i].state;
+        }
+    }
+    return best;
 }
 
 function resetText(value) {
@@ -1133,6 +1269,12 @@ QuotaHaloUsageIndicator.prototype = {
         this._buttonPressId = 0;
         this._keyPressId = 0;
         this._refreshing = false;
+        this._sessionStates = {};
+        this._notificationsPrimed = false;
+        this._notifSource = null;
+        this._sessionRows = [];
+        this._sessionsSig = '';
+        this._sessionDotState = null;
         this._copilotLabel = new St.Label({
             text: copilotLabelText(copilotStatus),
             y_align: Clutter.ActorAlign.CENTER,
@@ -1147,6 +1289,15 @@ QuotaHaloUsageIndicator.prototype = {
             text: '',
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'quotahalo-claude-label',
+        });
+        this._sessionDot = new St.DrawingArea({
+            width: 12,
+            height: 24,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-session-dot',
+        });
+        this._sessionDot.connect('repaint', function(area) {
+            self._drawSessionDot(area);
         });
         this._weeklyPct = usedPercent(status, 'weekly_used_pct');
         this._copilotPct = copilotUsedPercent(copilotStatus);
@@ -1271,6 +1422,7 @@ QuotaHaloUsageIndicator.prototype = {
         this._box.add_child(this._label);
         this._box.add_child(this._claudeWrap);
         this._box.add_child(this._claudeLabel);
+        this._box.add_child(this._sessionDot);
         this._setCopilotLabel(copilotStatus);
         this._setCodexLabel(status);
         this._setClaudeLabel(status);
@@ -1316,6 +1468,12 @@ QuotaHaloUsageIndicator.prototype = {
         this._claudeUnavailableItem = this._addMessageItem('Claude usage unavailable');
         this._claudeSeparator = new PopupMenu.PopupSeparatorMenuItem();
         this.menu.addMenuItem(this._claudeSeparator);
+
+        this._sessionsHeader = this._addProviderHeader('Claude Code Sessions', CLAUDE_ICON_PATH, 'claude');
+        this._sessionsSection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._sessionsSection);
+        this._sessionsSeparator = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._sessionsSeparator);
 
         this._actionsControl = addUsageActionsControl(this.menu, function() {
             if (!self._refreshing) {
@@ -1977,12 +2135,205 @@ QuotaHaloUsageIndicator.prototype = {
         }
     },
 
+    _drawSessionDot: function(area) {
+        var alloc = area.get_allocation_box();
+        var width = alloc.x2 - alloc.x1;
+        var height = alloc.y2 - alloc.y1;
+        var color;
+        var cr;
+
+        if (!this._sessionDotState)
+            return;
+        color = sessionDotColor(this._sessionDotState);
+        cr = area.get_context();
+        cr.setSourceRGBA(color[0], color[1], color[2], color[3]);
+        cr.arc(width / 2, height / 2, 4, 0, Math.PI * 2);
+        cr.fill();
+        cr.$dispose();
+    },
+
+    _updateSessionDot: function(state) {
+        this._sessionDotState = state || null;
+        if (this._sessionDotState) {
+            this._sessionDot.show();
+            if (this._sessionDot.queue_repaint)
+                this._sessionDot.queue_repaint();
+        } else {
+            this._sessionDot.hide();
+        }
+    },
+
+    _makeSessionRow: function(session) {
+        var item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'quotahalo-session-row-item',
+        });
+        var row = new St.BoxLayout({
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-session-row',
+        });
+        var state = String(session.state || 'idle');
+        var color = sessionDotColor(state);
+        var dot = new St.DrawingArea({
+            width: 12,
+            height: 14,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-session-row-dot',
+        });
+        var project = new St.Label({
+            text: String(session.title || session.project || session.session_id || 'session'),
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-session-project',
+        });
+        var sinceEpoch = Number(session.state_since_epoch || session.updated_epoch) || 0;
+        var stateText = sessionStateLabel(state);
+        var stateLabel;
+        var ago;
+
+        if (state === 'working' && session.current_tool)
+            stateText += ' · ' + String(session.current_tool);
+        stateLabel = new St.Label({
+            text: stateText,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-session-state',
+        });
+        ago = new St.Label({
+            text: compactAgo(sinceEpoch),
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-session-ago',
+        });
+
+        dot.connect('repaint', function(area) {
+            var a = area.get_allocation_box();
+            var cr = area.get_context();
+            cr.setSourceRGBA(color[0], color[1], color[2], color[3]);
+            cr.arc((a.x2 - a.x1) / 2, (a.y2 - a.y1) / 2, 4, 0, Math.PI * 2);
+            cr.fill();
+            cr.$dispose();
+        });
+
+        row.add_child(dot);
+        row.add_child(project);
+        row.add_child(stateLabel);
+        row.add_child(ago);
+        item.add_child(row);
+        return { item: item, agoLabel: ago, sinceEpoch: sinceEpoch };
+    },
+
+    _setSessionsDetails: function(sessions) {
+        var sig;
+        var i;
+        var row;
+
+        if (!sessions.length) {
+            setItemVisible(this._sessionsHeader.item, false);
+            setItemVisible(this._sessionsSeparator, false);
+            if (this._sessionsSig !== '') {
+                this._sessionsSection.removeAll();
+                this._sessionRows = [];
+                this._sessionsSig = '';
+            }
+            return false;
+        }
+
+        setItemVisible(this._sessionsHeader.item, true);
+        setItemVisible(this._sessionsSeparator, true);
+        this._setProviderHeaderLines(
+            this._sessionsHeader,
+            String(sessions.length) + (sessions.length === 1 ? ' session' : ' sessions'),
+            '');
+
+        sig = sessions.map(function(s) {
+            return (s.session_id || '') + ':' + (s.state || '') + ':' +
+                (s.current_tool || '') + ':' + (s.title || s.project || '');
+        }).join('|');
+
+        if (sig === this._sessionsSig) {
+            for (i = 0; i < this._sessionRows.length; i++) {
+                row = this._sessionRows[i];
+                row.agoLabel.set_text(compactAgo(row.sinceEpoch));
+            }
+            return true;
+        }
+
+        this._sessionsSig = sig;
+        this._sessionsSection.removeAll();
+        this._sessionRows = [];
+        for (i = 0; i < sessions.length; i++) {
+            row = this._makeSessionRow(sessions[i]);
+            this._sessionRows.push(row);
+            this._sessionsSection.addMenuItem(row.item);
+        }
+        return true;
+    },
+
+    _maybeNotify: function(sessions) {
+        var current = {};
+        var i;
+        var s;
+        var prev;
+        var project;
+
+        if (!this._notificationsPrimed) {
+            for (i = 0; i < sessions.length; i++)
+                if (sessions[i].session_id)
+                    current[sessions[i].session_id] = sessions[i].state;
+            this._sessionStates = current;
+            this._notificationsPrimed = true;
+            return;
+        }
+
+        for (i = 0; i < sessions.length; i++) {
+            s = sessions[i];
+            if (!s.session_id)
+                continue;
+            current[s.session_id] = s.state;
+            prev = this._sessionStates[s.session_id];
+            project = String(s.project || 'Claude Code');
+            if (prev === 'working' && s.state === 'needs_input')
+                this._notify('Claude needs you', project + ' — needs your input');
+            else if (prev === 'working' && s.state === 'awaiting_reply')
+                this._notify('Claude finished', project + ' — your turn to reply');
+        }
+        this._sessionStates = current;
+    },
+
+    _notify: function(title, body) {
+        var self = this;
+        var source = this._notifSource;
+        var gicon = null;
+        var notification;
+
+        try {
+            if (!source) {
+                source = new MessageTray.Source('QuotaHalo', null);
+                source.connect('destroy', function() {
+                    self._notifSource = null;
+                });
+                Main.messageTray.add(source);
+                this._notifSource = source;
+            }
+            if (GLib.file_test(CLAUDE_ICON_PATH, GLib.FileTest.EXISTS))
+                gicon = new Gio.FileIcon({ file: Gio.File.new_for_path(CLAUDE_ICON_PATH) });
+            notification = new MessageTray.Notification(source, title, body, { gicon: gicon });
+            notification.setTransient(false);
+            source.showNotification(notification);
+        } catch (e) {
+            log('quotahalo notify failed: ' + e);
+        }
+    },
+
     _update: function() {
         var status = readStatus();
         var copilotStatus = readCopilotStatus();
+        var sessions;
         var showCopilot;
         var showCodex;
         var showClaude;
+        var showSessions;
         var footerVisible;
 
         this._setCopilotLabel(copilotStatus);
@@ -2001,7 +2352,11 @@ QuotaHaloUsageIndicator.prototype = {
         showCopilot = this._setCopilotDetails(copilotStatus);
         showCodex = this._setCodexDetails(status);
         showClaude = this._setClaudeDetails(status);
-        footerVisible = showCopilot || showCodex || showClaude;
+        sessions = readSessions();
+        showSessions = this._setSessionsDetails(sessions);
+        this._updateSessionDot(aggregateSessionState(sessions));
+        this._maybeNotify(sessions);
+        footerVisible = showCopilot || showCodex || showClaude || showSessions;
 
         if (footerVisible)
             this._button.show();
@@ -2055,6 +2410,10 @@ QuotaHaloUsageIndicator.prototype = {
         if (this._startupRefreshTimeoutId) {
             GLib.Source.remove(this._startupRefreshTimeoutId);
             this._startupRefreshTimeoutId = 0;
+        }
+        if (this._notifSource) {
+            this._notifSource.destroy();
+            this._notifSource = null;
         }
         if (this.menu) {
             this.menu.destroy();

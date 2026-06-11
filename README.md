@@ -9,6 +9,7 @@ QuotaHalo Linux is a GNOME top-bar widget that keeps your Copilot, Codex, and Cl
 - GitHub Copilot AI Credits usage
 - OpenAI Codex 5-hour and 7-day quotas
 - Claude Code 5-hour and 7-day quotas
+- Live Claude Code session status (working / awaiting reply / needs input / idle), with desktop alerts
 - CPU, memory, and GPU usage
 - Network download/upload speed
 
@@ -33,6 +34,22 @@ GITHUB_USERNAME=your_github_username_here
 6. Click `Generate token`, then copy the generated token into `GITHUB_TOKEN` in `.env`.
 
 Note: the token must have the `Plan: Read-only` permission, otherwise it cannot read billing and usage information.
+
+## Claude Code Session Status
+
+QuotaHalo can also show what your running Claude Code sessions are doing, right on the usage pill:
+
+- A single colored dot summarizes every session — **green** = working, **blue** = finished its turn (your turn to reply), **amber** = needs your input (a permission prompt or a question), **grey** = idle (away after finishing). The dot shows the most urgent state (needs-input > working > awaiting-reply > idle) and is hidden when no session is running.
+- Click the pill to open the **Claude Code Sessions** list, showing each session's title, state, current tool, and time in that state. (The title is Claude Code's own session name; it falls back to the working-directory name until a title is generated.)
+- You get a desktop notification when a session goes from **working → needs input** or **working → finished (your turn)**, so you can start a task, switch away, and get pinged when it needs you or is done.
+
+This is powered by [Claude Code hooks](https://docs.claude.com/en/docs/claude-code/hooks). The installer registers them in `~/.claude/settings.json` with a non-destructive merge: your existing settings are backed up to `settings.json.quotahalo.bak`, sibling keys are preserved, and re-running the installer is a no-op. Each event runs a tiny local script (`claude_session_hook.py`) that records the session's state under `~/.cache/quotahalo/sessions/`. Nothing leaves your machine.
+
+Remove the hooks at any time:
+
+```bash
+python3 install_hooks.py --uninstall
+```
 
 ## Install
 
