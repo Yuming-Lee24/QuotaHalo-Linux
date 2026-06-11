@@ -222,6 +222,58 @@ function compactAgo(epoch) {
     return Math.round(secs / 86400) + 'd';
 }
 
+// Claude Code sets each terminal's window title to the session title (with a
+// leading status glyph), so we locate a session's window by substring-matching
+// its title. Works when each session is its own window; tabs share one title.
+function findWindowByTitle(needle) {
+    var key = String(needle || '').trim().toLowerCase();
+    var actors;
+    var i;
+    var win;
+    var title;
+
+    if (!key)
+        return null;
+    actors = global.get_window_actors();
+    for (i = 0; i < actors.length; i++) {
+        win = actors[i].meta_window ||
+            (actors[i].get_meta_window ? actors[i].get_meta_window() : null);
+        if (!win || !win.get_title)
+            continue;
+        title = (win.get_title() || '').toLowerCase();
+        if (title.indexOf(key) >= 0)
+            return win;
+    }
+    return null;
+}
+
+// Fallback: focus a window owned by one of the session's ancestor processes
+// (its terminal). Exact for per-window terminals; for gnome-terminal's shared
+// server pid it brings a gnome-terminal window to the front.
+function findWindowByPids(pids) {
+    var set = {};
+    var actors;
+    var i;
+    var win;
+    var pid;
+
+    if (!pids || !pids.length)
+        return null;
+    for (i = 0; i < pids.length; i++)
+        set[String(pids[i])] = true;
+    actors = global.get_window_actors();
+    for (i = 0; i < actors.length; i++) {
+        win = actors[i].meta_window ||
+            (actors[i].get_meta_window ? actors[i].get_meta_window() : null);
+        if (!win || !win.get_pid)
+            continue;
+        pid = win.get_pid();
+        if (pid && set[String(pid)])
+            return win;
+    }
+    return null;
+}
+
 function readSessions() {
     var sessions = [];
     var now = sessionsNowEpoch();
@@ -1291,7 +1343,7 @@ QuotaHaloUsageIndicator.prototype = {
             style_class: 'quotahalo-claude-label',
         });
         this._sessionDot = new St.DrawingArea({
-            width: 12,
+            width: 22,
             height: 24,
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'quotahalo-session-dot',
@@ -2139,6 +2191,7 @@ QuotaHaloUsageIndicator.prototype = {
         var alloc = area.get_allocation_box();
         var width = alloc.x2 - alloc.x1;
         var height = alloc.y2 - alloc.y1;
+        var radius = Math.min(9, Math.min(width, height) / 2);
         var color;
         var cr;
 
@@ -2147,7 +2200,7 @@ QuotaHaloUsageIndicator.prototype = {
         color = sessionDotColor(this._sessionDotState);
         cr = area.get_context();
         cr.setSourceRGBA(color[0], color[1], color[2], color[3]);
-        cr.arc(width / 2, height / 2, 4, 0, Math.PI * 2);
+        cr.arc(width / 2, height / 2, radius, 0, Math.PI * 2);
         cr.fill();
         cr.$dispose();
     },
@@ -2276,6 +2329,7 @@ QuotaHaloUsageIndicator.prototype = {
         var s;
         var prev;
         var project;
+        var matchKey;
 
         if (!this._notificationsPrimed) {
             for (i = 0; i < sessions.length; i++)
@@ -2293,15 +2347,23 @@ QuotaHaloUsageIndicator.prototype = {
             current[s.session_id] = s.state;
             prev = this._sessionStates[s.session_id];
             project = String(s.project || 'Claude Code');
+            matchKey = s.title || s.project;
             if (prev === 'working' && s.state === 'needs_input')
-                this._notify('Claude needs you', project + ' — needs your input');
+                this._notify('Claude needs you', project + ' — needs your input', matchKey, s.ancestor_pids);
             else if (prev === 'working' && s.state === 'awaiting_reply')
-                this._notify('Claude finished', project + ' — your turn to reply');
+                this._notify('Claude finished', project + ' — your turn to reply', matchKey, s.ancestor_pids);
         }
         this._sessionStates = current;
     },
 
-    _notify: function(title, body) {
+    _focusSessionWindow: function(matchKey, pids) {
+        var win = findWindowByTitle(matchKey) || findWindowByPids(pids);
+
+        if (win)
+            Main.activateWindow(win);
+    },
+
+    _notify: function(title, body, matchKey, pids) {
         var self = this;
         var source = this._notifSource;
         var gicon = null;
@@ -2320,6 +2382,12 @@ QuotaHaloUsageIndicator.prototype = {
                 gicon = new Gio.FileIcon({ file: Gio.File.new_for_path(CLAUDE_ICON_PATH) });
             notification = new MessageTray.Notification(source, title, body, { gicon: gicon });
             notification.setTransient(false);
+            if (matchKey || (pids && pids.length)) {
+                // Clicking the notification focuses that session's terminal window.
+                notification.connect('activated', function() {
+                    self._focusSessionWindow(matchKey, pids);
+                });
+            }
             source.showNotification(notification);
         } catch (e) {
             log('quotahalo notify failed: ' + e);

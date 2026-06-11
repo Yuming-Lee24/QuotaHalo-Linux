@@ -264,6 +264,58 @@ def _session_title(session_id):
     return best
 
 
+def _session_pid(session_id):
+    """Return the process pid for a session from Claude's pid files, or None."""
+    if not session_id:
+        return None
+    best_pid = None
+    best_updated = -1
+    try:
+        entries = list(CLAUDE_SESSIONS_DIR.glob("*.json"))
+    except Exception:
+        return None
+    for entry in entries:
+        if not entry.stem.isdigit():
+            continue
+        try:
+            data = json.loads(entry.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("sessionId") != session_id:
+            continue
+        updated = data.get("updatedAt") or 0
+        if updated >= best_updated:
+            best_updated = updated
+            best_pid = int(entry.stem)
+    return best_pid
+
+
+def _ancestor_pids(pid, max_depth=8):
+    """Walk the process tree up from ``pid`` (claude -> shell -> terminal).
+
+    Returns the chain of pids up to but excluding the session manager, so the
+    extension can match a window owned by the session's terminal process.
+    """
+    chain = []
+    cur = pid
+    depth = 0
+    while cur and cur > 1 and depth < max_depth:
+        try:
+            with open("/proc/%d/stat" % cur, "r", encoding="utf-8") as fh:
+                content = fh.read()
+            rparen = content.rindex(")")
+            comm = content[content.index("(") + 1:rparen]
+            ppid = int(content[rparen + 2:].split()[1])
+        except Exception:
+            break
+        if comm in ("systemd", "init"):
+            break
+        chain.append(cur)
+        cur = ppid
+        depth += 1
+    return chain
+
+
 def _last_ai_title(transcript_path, tail_bytes=131072):
     """Return the most recent ``aiTitle`` from the transcript tail, or None.
 
@@ -346,6 +398,14 @@ def handle_event(payload, now=None):
         title = _last_ai_title(payload.get("transcript_path"))
     if title:
         record["title"] = title
+
+    # Record the terminal process ancestry so the panel can focus the right
+    # window if title matching fails. Recompute on (re)start; stable otherwise.
+    if event == "SessionStart" or "ancestor_pids" not in record:
+        spid = _session_pid(payload.get("session_id"))
+        ancestors = _ancestor_pids(spid) if spid else []
+        if ancestors:
+            record["ancestor_pids"] = ancestors
     model = payload.get("model")
     if model:
         record["model"] = model
