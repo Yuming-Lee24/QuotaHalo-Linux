@@ -222,6 +222,31 @@ function compactAgo(epoch) {
     return Math.round(secs / 86400) + 'd';
 }
 
+// Claude Code sets each terminal's window title to the session title (with a
+// leading status glyph), so we locate a session's window by substring-matching
+// its title. Works when each session is its own window; tabs share one title.
+function findWindowByTitle(needle) {
+    var key = String(needle || '').trim().toLowerCase();
+    var actors;
+    var i;
+    var win;
+    var title;
+
+    if (!key)
+        return null;
+    actors = global.get_window_actors();
+    for (i = 0; i < actors.length; i++) {
+        win = actors[i].meta_window ||
+            (actors[i].get_meta_window ? actors[i].get_meta_window() : null);
+        if (!win || !win.get_title)
+            continue;
+        title = (win.get_title() || '').toLowerCase();
+        if (title.indexOf(key) >= 0)
+            return win;
+    }
+    return null;
+}
+
 function readSessions() {
     var sessions = [];
     var now = sessionsNowEpoch();
@@ -2277,6 +2302,7 @@ QuotaHaloUsageIndicator.prototype = {
         var s;
         var prev;
         var project;
+        var matchKey;
 
         if (!this._notificationsPrimed) {
             for (i = 0; i < sessions.length; i++)
@@ -2294,15 +2320,23 @@ QuotaHaloUsageIndicator.prototype = {
             current[s.session_id] = s.state;
             prev = this._sessionStates[s.session_id];
             project = String(s.project || 'Claude Code');
+            matchKey = s.title || s.project;
             if (prev === 'working' && s.state === 'needs_input')
-                this._notify('Claude needs you', project + ' — needs your input');
+                this._notify('Claude needs you', project + ' — needs your input', matchKey);
             else if (prev === 'working' && s.state === 'awaiting_reply')
-                this._notify('Claude finished', project + ' — your turn to reply');
+                this._notify('Claude finished', project + ' — your turn to reply', matchKey);
         }
         this._sessionStates = current;
     },
 
-    _notify: function(title, body) {
+    _focusSessionWindow: function(matchKey) {
+        var win = findWindowByTitle(matchKey);
+
+        if (win)
+            Main.activateWindow(win);
+    },
+
+    _notify: function(title, body, matchKey) {
         var self = this;
         var source = this._notifSource;
         var gicon = null;
@@ -2321,6 +2355,12 @@ QuotaHaloUsageIndicator.prototype = {
                 gicon = new Gio.FileIcon({ file: Gio.File.new_for_path(CLAUDE_ICON_PATH) });
             notification = new MessageTray.Notification(source, title, body, { gicon: gicon });
             notification.setTransient(false);
+            if (matchKey) {
+                // Clicking the notification focuses that session's terminal window.
+                notification.connect('activated', function() {
+                    self._focusSessionWindow(matchKey);
+                });
+            }
             source.showNotification(notification);
         } catch (e) {
             log('quotahalo notify failed: ' + e);
