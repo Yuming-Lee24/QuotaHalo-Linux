@@ -45,10 +45,13 @@ QuotaHalo 还能在额度胶囊上直接显示你正在运行的 Claude Code 会
 
 该功能基于 [Claude Code hooks](https://docs.claude.com/en/docs/claude-code/hooks) 实现。安装脚本会以「非破坏式合并」的方式把它们写入 `~/.claude/settings.json`：原有设置会备份到 `settings.json.quotahalo.bak`，其它键保持不变，重复运行安装脚本不会重复添加。每个事件都会运行一个很小的本地脚本（`claude_session_hook.py`），把会话状态记录到 `~/.cache/quotahalo/sessions/`。所有数据都不会离开你的机器。
 
+**Codex CLI** 的会话也享受同样的待遇——在 Codex 额度旁边有一个独立的状态点，弹窗里有独立的「Codex Sessions」列表——通过 Codex 自己的 hooks（`~/.codex/hooks.json`）实现。多一步：Codex 要求命令型 hook 必须被信任，所以装完后在 Codex 里运行一次 **`/hooks` 并批准** QuotaHalo 这个 hook。（Codex 显示 工作中 / 等待批准 / 轮到你；没有「空闲」状态。）
+
 随时可以移除这些 hooks：
 
 ```bash
-python3 install_hooks.py --uninstall
+python3 install_hooks.py --uninstall            # Claude Code (~/.claude/settings.json)
+python3 install_hooks.py --uninstall --codex    # Codex (~/.codex/hooks.json)
 ```
 
 ## 安装

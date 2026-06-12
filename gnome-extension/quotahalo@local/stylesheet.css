@@ -279,6 +279,15 @@
   color: rgba(240, 253, 250, 0.98);
 }
 
+.quotahalo-claude-reset-label,
+.quotahalo-codex-reset-label {
+  min-width: 30px;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: 2px;
+}
+
 .quotahalo-session-dot {
   min-width: 22px;
   min-height: 18px;

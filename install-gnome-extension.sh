@@ -54,16 +54,24 @@ PY
 # Register the Claude Code session-status hooks (writes ~/.claude/settings.json).
 # The hook command runs under /usr/bin/python3 (fast, stdlib-only); fall back to
 # the resolved PYTHON_BIN only if the system python is missing.
+HOOK_PYTHON="/usr/bin/python3"
+[[ -x "${HOOK_PYTHON}" ]] || HOOK_PYTHON="${PYTHON_BIN}"
 if [[ -d "${HOME}/.claude" ]]; then
-    HOOK_PYTHON="/usr/bin/python3"
-    [[ -x "${HOOK_PYTHON}" ]] || HOOK_PYTHON="${PYTHON_BIN}"
-    if python3 "${REPO_DIR}/install_hooks.py" --install "${REPO_DIR}" --python "${HOOK_PYTHON}"; then
-        :
-    else
+    if ! python3 "${REPO_DIR}/install_hooks.py" --install "${REPO_DIR}" --python "${HOOK_PYTHON}"; then
         echo "WARN: could not register Claude Code session hooks in ~/.claude/settings.json."
     fi
 else
     echo "Skipping Claude Code session hooks: ~/.claude not found (install Claude Code first, then rerun)."
+fi
+
+# Codex CLI session-status hooks (writes ~/.codex/hooks.json). Codex requires
+# command hooks to be trusted, so the user must run `/hooks` inside Codex once.
+if [[ -d "${HOME}/.codex" ]]; then
+    if ! python3 "${REPO_DIR}/install_hooks.py" --install "${REPO_DIR}" --codex --python "${HOOK_PYTHON}"; then
+        echo "WARN: could not register Codex session hooks in ~/.codex/hooks.json."
+    fi
+else
+    echo "Skipping Codex session hooks: ~/.codex not found (install Codex CLI first, then rerun)."
 fi
 
 gsettings set org.gnome.shell disable-user-extensions false || true
@@ -142,6 +150,9 @@ echo "Installed and enabled ${UUID}."
 echo "QuotaHalo refresh timer and Copilot usage service are enabled."
 echo "Claude Code session status: hooks registered in ~/.claude/settings.json."
 echo "  Remove them later with: python3 \"${REPO_DIR}/install_hooks.py\" --uninstall"
+echo "Codex session status: hooks registered in ~/.codex/hooks.json."
+echo "  ACTION NEEDED: run /hooks inside Codex once to TRUST the QuotaHalo hook."
+echo "  Remove them later with: python3 \"${REPO_DIR}/install_hooks.py\" --uninstall --codex"
 if [[ "${EXTENSION_NEEDS_RELOAD}" == "1" ]]; then
     echo "Reload GNOME Shell to activate the newly installed extension."
 fi
