@@ -45,10 +45,13 @@ QuotaHalo can also show what your running Claude Code sessions are doing, right 
 
 This is powered by [Claude Code hooks](https://docs.claude.com/en/docs/claude-code/hooks). The installer registers them in `~/.claude/settings.json` with a non-destructive merge: your existing settings are backed up to `settings.json.quotahalo.bak`, sibling keys are preserved, and re-running the installer is a no-op. Each event runs a tiny local script (`claude_session_hook.py`) that records the session's state under `~/.cache/quotahalo/sessions/`. Nothing leaves your machine.
 
+**Codex CLI** sessions get the same treatment — a separate status dot next to the Codex quota and a "Codex Sessions" list — via Codex's own hooks (`~/.codex/hooks.json`). One extra step: Codex requires command hooks to be trusted, so after installing run **`/hooks` inside Codex once and approve** the QuotaHalo hook. (Codex shows working / needs-approval / your-turn; it has no idle state.)
+
 Remove the hooks at any time:
 
 ```bash
-python3 install_hooks.py --uninstall
+python3 install_hooks.py --uninstall            # Claude Code (~/.claude/settings.json)
+python3 install_hooks.py --uninstall --codex    # Codex (~/.codex/hooks.json)
 ```
 
 ## Install

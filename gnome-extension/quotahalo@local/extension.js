@@ -52,6 +52,12 @@ var SESSIONS_DIR = GLib.build_filenamev([
     'quotahalo',
     'sessions',
 ]);
+var CODEX_SESSIONS_DIR = GLib.build_filenamev([
+    GLib.get_home_dir(),
+    '.cache',
+    'quotahalo',
+    'codex-sessions',
+]);
 // Hide a Claude Code session whose last event is older than this (seconds).
 // Mirrors STALE_SECONDS in claude_session_hook.py: a long tool run can stay
 // quiet, so "working" gets the longest leash; idle/waiting are reaped sooner.
@@ -274,7 +280,7 @@ function findWindowByPids(pids) {
     return null;
 }
 
-function readSessions() {
+function readSessions(dir) {
     var sessions = [];
     var now = sessionsNowEpoch();
     var enumerator;
@@ -288,7 +294,7 @@ function readSessions() {
     var limit;
 
     try {
-        enumerator = Gio.File.new_for_path(SESSIONS_DIR).enumerate_children(
+        enumerator = Gio.File.new_for_path(dir).enumerate_children(
             'standard::name', Gio.FileQueryInfoFlags.NONE, null);
     } catch (e) {
         return sessions;
@@ -298,7 +304,7 @@ function readSessions() {
         if (name.slice(-5) !== '.json')
             continue;
         try {
-            path = GLib.build_filenamev([SESSIONS_DIR, name]);
+            path = GLib.build_filenamev([dir, name]);
             result = GLib.file_get_contents(path);
             if (!result[0])
                 continue;
@@ -1354,12 +1360,19 @@ QuotaHaloUsageIndicator.prototype = {
         this._buttonPressId = 0;
         this._keyPressId = 0;
         this._refreshing = false;
-        this._sessionStates = {};
-        this._notificationsPrimed = false;
         this._notifSource = null;
-        this._sessionRows = [];
-        this._sessionsSig = '';
-        this._sessionDotState = null;
+        // One session group per agent: each owns its pill dot, popup section,
+        // rebuild signature, row pool, and notification state.
+        this._claudeGroup = {
+            dir: SESSIONS_DIR, notifyName: 'Claude',
+            dot: null, header: null, section: null, separator: null,
+            sig: '', rows: [], states: {}, primed: false,
+        };
+        this._codexGroup = {
+            dir: CODEX_SESSIONS_DIR, notifyName: 'Codex',
+            dot: null, header: null, section: null, separator: null,
+            sig: '', rows: [], states: {}, primed: false,
+        };
         this._copilotLabel = new St.Label({
             text: copilotLabelText(copilotStatus),
             y_align: Clutter.ActorAlign.CENTER,
@@ -1385,13 +1398,22 @@ QuotaHaloUsageIndicator.prototype = {
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'quotahalo-claude-reset-label',
         });
-        this._sessionDot = new St.DrawingArea({
+        this._codexGroup.dot = new St.DrawingArea({
             width: 22,
             height: 24,
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'quotahalo-session-dot',
         });
-        this._sessionDot.connect('repaint', function(area) {
+        this._claudeGroup.dot = new St.DrawingArea({
+            width: 22,
+            height: 24,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'quotahalo-session-dot',
+        });
+        this._codexGroup.dot.connect('repaint', function(area) {
+            self._drawSessionDot(area);
+        });
+        this._claudeGroup.dot.connect('repaint', function(area) {
             self._drawSessionDot(area);
         });
         this._weeklyPct = usedPercent(status, 'weekly_used_pct');
@@ -1516,10 +1538,11 @@ QuotaHaloUsageIndicator.prototype = {
         this._box.add_child(this._ringWrap);
         this._box.add_child(this._label);
         this._box.add_child(this._codexResetLabel);
+        this._box.add_child(this._codexGroup.dot);
         this._box.add_child(this._claudeWrap);
         this._box.add_child(this._claudeLabel);
         this._box.add_child(this._claudeResetLabel);
-        this._box.add_child(this._sessionDot);
+        this._box.add_child(this._claudeGroup.dot);
         this._setCopilotLabel(copilotStatus);
         this._setCodexLabel(status);
         this._setClaudeLabel(status);
@@ -1559,6 +1582,12 @@ QuotaHaloUsageIndicator.prototype = {
         this._codexSeparator = new PopupMenu.PopupSeparatorMenuItem();
         this.menu.addMenuItem(this._codexSeparator);
 
+        this._codexGroup.header = this._addProviderHeader('Codex Sessions', OPENAI_ICON_PATH, 'openai');
+        this._codexGroup.section = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._codexGroup.section);
+        this._codexGroup.separator = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._codexGroup.separator);
+
         this._claudeHeader = this._addProviderHeader('Claude', CLAUDE_ICON_PATH, 'claude');
         this._claudeItem = this._addUsageDetailRow('5h Session', 'claude');
         this._claudeWeeklyItem = this._addUsageDetailRow('7d Usage', 'claude');
@@ -1566,11 +1595,11 @@ QuotaHaloUsageIndicator.prototype = {
         this._claudeSeparator = new PopupMenu.PopupSeparatorMenuItem();
         this.menu.addMenuItem(this._claudeSeparator);
 
-        this._sessionsHeader = this._addProviderHeader('Claude Code Sessions', CLAUDE_ICON_PATH, 'claude');
-        this._sessionsSection = new PopupMenu.PopupMenuSection();
-        this.menu.addMenuItem(this._sessionsSection);
-        this._sessionsSeparator = new PopupMenu.PopupSeparatorMenuItem();
-        this.menu.addMenuItem(this._sessionsSeparator);
+        this._claudeGroup.header = this._addProviderHeader('Claude Code Sessions', CLAUDE_ICON_PATH, 'claude');
+        this._claudeGroup.section = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._claudeGroup.section);
+        this._claudeGroup.separator = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._claudeGroup.separator);
 
         this._actionsControl = addUsageActionsControl(this.menu, function() {
             if (!self._refreshing) {
@@ -2257,12 +2286,13 @@ QuotaHaloUsageIndicator.prototype = {
         var width = alloc.x2 - alloc.x1;
         var height = alloc.y2 - alloc.y1;
         var radius = Math.min(9, Math.min(width, height) / 2);
+        var state = area._qhState;
         var color;
         var cr;
 
-        if (!this._sessionDotState)
+        if (!state)
             return;
-        color = sessionDotColor(this._sessionDotState);
+        color = sessionDotColor(state);
         cr = area.get_context();
         cr.setSourceRGBA(color[0], color[1], color[2], color[3]);
         cr.arc(width / 2, height / 2, radius, 0, Math.PI * 2);
@@ -2270,14 +2300,16 @@ QuotaHaloUsageIndicator.prototype = {
         cr.$dispose();
     },
 
-    _updateSessionDot: function(state) {
-        this._sessionDotState = state || null;
-        if (this._sessionDotState) {
-            this._sessionDot.show();
-            if (this._sessionDot.queue_repaint)
-                this._sessionDot.queue_repaint();
+    _updateSessionDot: function(group, state) {
+        var dot = group.dot;
+
+        dot._qhState = state || null;
+        if (dot._qhState) {
+            dot.show();
+            if (dot.queue_repaint)
+                dot.queue_repaint();
         } else {
-            this._sessionDot.hide();
+            dot.hide();
         }
     },
 
@@ -2341,26 +2373,27 @@ QuotaHaloUsageIndicator.prototype = {
         return { item: item, agoLabel: ago, sinceEpoch: sinceEpoch };
     },
 
-    _setSessionsDetails: function(sessions) {
+    _setSessionsDetails: function(group, sessions) {
+        var self = this;
         var sig;
         var i;
         var row;
 
         if (!sessions.length) {
-            setItemVisible(this._sessionsHeader.item, false);
-            setItemVisible(this._sessionsSeparator, false);
-            if (this._sessionsSig !== '') {
-                this._sessionsSection.removeAll();
-                this._sessionRows = [];
-                this._sessionsSig = '';
+            setItemVisible(group.header.item, false);
+            setItemVisible(group.separator, false);
+            if (group.sig !== '') {
+                group.section.removeAll();
+                group.rows = [];
+                group.sig = '';
             }
             return false;
         }
 
-        setItemVisible(this._sessionsHeader.item, true);
-        setItemVisible(this._sessionsSeparator, true);
+        setItemVisible(group.header.item, true);
+        setItemVisible(group.separator, true);
         this._setProviderHeaderLines(
-            this._sessionsHeader,
+            group.header,
             String(sessions.length) + (sessions.length === 1 ? ' session' : ' sessions'),
             '');
 
@@ -2369,26 +2402,26 @@ QuotaHaloUsageIndicator.prototype = {
                 (s.current_tool || '') + ':' + (s.title || s.project || '');
         }).join('|');
 
-        if (sig === this._sessionsSig) {
-            for (i = 0; i < this._sessionRows.length; i++) {
-                row = this._sessionRows[i];
+        if (sig === group.sig) {
+            for (i = 0; i < group.rows.length; i++) {
+                row = group.rows[i];
                 row.agoLabel.set_text(compactAgo(row.sinceEpoch));
             }
             return true;
         }
 
-        this._sessionsSig = sig;
-        this._sessionsSection.removeAll();
-        this._sessionRows = [];
+        group.sig = sig;
+        group.section.removeAll();
+        group.rows = [];
         for (i = 0; i < sessions.length; i++) {
-            row = this._makeSessionRow(sessions[i]);
-            this._sessionRows.push(row);
-            this._sessionsSection.addMenuItem(row.item);
+            row = self._makeSessionRow(sessions[i]);
+            group.rows.push(row);
+            group.section.addMenuItem(row.item);
         }
         return true;
     },
 
-    _maybeNotify: function(sessions) {
+    _maybeNotify: function(group, sessions) {
         var current = {};
         var i;
         var s;
@@ -2396,12 +2429,12 @@ QuotaHaloUsageIndicator.prototype = {
         var project;
         var matchKey;
 
-        if (!this._notificationsPrimed) {
+        if (!group.primed) {
             for (i = 0; i < sessions.length; i++)
                 if (sessions[i].session_id)
                     current[sessions[i].session_id] = sessions[i].state;
-            this._sessionStates = current;
-            this._notificationsPrimed = true;
+            group.states = current;
+            group.primed = true;
             return;
         }
 
@@ -2410,15 +2443,15 @@ QuotaHaloUsageIndicator.prototype = {
             if (!s.session_id)
                 continue;
             current[s.session_id] = s.state;
-            prev = this._sessionStates[s.session_id];
-            project = String(s.project || 'Claude Code');
+            prev = group.states[s.session_id];
+            project = String(s.project || group.notifyName);
             matchKey = s.title || s.project;
             if (prev === 'working' && s.state === 'needs_input')
-                this._notify('Claude needs you', project + ' — needs your input', matchKey, s.ancestor_pids);
+                this._notify(group.notifyName + ' needs you', project + ' — needs your input', matchKey, s.ancestor_pids);
             else if (prev === 'working' && s.state === 'awaiting_reply')
-                this._notify('Claude finished', project + ' — your turn to reply', matchKey, s.ancestor_pids);
+                this._notify(group.notifyName + ' finished', project + ' — your turn to reply', matchKey, s.ancestor_pids);
         }
-        this._sessionStates = current;
+        group.states = current;
     },
 
     _focusSessionWindow: function(matchKey, pids) {
@@ -2462,7 +2495,8 @@ QuotaHaloUsageIndicator.prototype = {
     _update: function() {
         var status = readStatus();
         var copilotStatus = readCopilotStatus();
-        var sessions;
+        var claudeSessions;
+        var codexSessions;
         var showCopilot;
         var showCodex;
         var showClaude;
@@ -2487,10 +2521,14 @@ QuotaHaloUsageIndicator.prototype = {
         showCopilot = this._setCopilotDetails(copilotStatus);
         showCodex = this._setCodexDetails(status);
         showClaude = this._setClaudeDetails(status);
-        sessions = readSessions();
-        showSessions = this._setSessionsDetails(sessions);
-        this._updateSessionDot(aggregateSessionState(sessions));
-        this._maybeNotify(sessions);
+        claudeSessions = readSessions(this._claudeGroup.dir);
+        codexSessions = readSessions(this._codexGroup.dir);
+        showSessions = this._setSessionsDetails(this._claudeGroup, claudeSessions);
+        showSessions = this._setSessionsDetails(this._codexGroup, codexSessions) || showSessions;
+        this._updateSessionDot(this._claudeGroup, aggregateSessionState(claudeSessions));
+        this._updateSessionDot(this._codexGroup, aggregateSessionState(codexSessions));
+        this._maybeNotify(this._claudeGroup, claudeSessions);
+        this._maybeNotify(this._codexGroup, codexSessions);
         footerVisible = showCopilot || showCodex || showClaude || showSessions;
 
         if (footerVisible)
