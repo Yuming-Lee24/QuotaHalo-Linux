@@ -1364,12 +1364,12 @@ QuotaHaloUsageIndicator.prototype = {
         // One session group per agent: each owns its pill dot, popup section,
         // rebuild signature, row pool, and notification state.
         this._claudeGroup = {
-            dir: SESSIONS_DIR, notifyName: 'Claude',
+            dir: SESSIONS_DIR, notifyName: 'Claude', icon: CLAUDE_ICON_PATH,
             dot: null, header: null, section: null, separator: null,
             sig: '', rows: [], states: {}, primed: false,
         };
         this._codexGroup = {
-            dir: CODEX_SESSIONS_DIR, notifyName: 'Codex',
+            dir: CODEX_SESSIONS_DIR, notifyName: 'Codex', icon: OPENAI_ICON_PATH,
             dot: null, header: null, section: null, separator: null,
             sig: '', rows: [], states: {}, primed: false,
         };
@@ -2447,9 +2447,9 @@ QuotaHaloUsageIndicator.prototype = {
             project = String(s.project || group.notifyName);
             matchKey = s.title || s.project;
             if (prev === 'working' && s.state === 'needs_input')
-                this._notify(group.notifyName + ' needs you', project + ' — needs your input', matchKey, s.ancestor_pids);
+                this._notify(group.notifyName + ' needs you', project + ' — needs your input', matchKey, s.ancestor_pids, group.icon);
             else if (prev === 'working' && s.state === 'awaiting_reply')
-                this._notify(group.notifyName + ' finished', project + ' — your turn to reply', matchKey, s.ancestor_pids);
+                this._notify(group.notifyName + ' finished', project + ' — your turn to reply', matchKey, s.ancestor_pids, group.icon);
         }
         group.states = current;
     },
@@ -2461,7 +2461,7 @@ QuotaHaloUsageIndicator.prototype = {
             Main.activateWindow(win);
     },
 
-    _notify: function(title, body, matchKey, pids) {
+    _notify: function(title, body, matchKey, pids, iconPath) {
         var self = this;
         var source = this._notifSource;
         var gicon = null;
@@ -2476,8 +2476,9 @@ QuotaHaloUsageIndicator.prototype = {
                 Main.messageTray.add(source);
                 this._notifSource = source;
             }
-            if (GLib.file_test(CLAUDE_ICON_PATH, GLib.FileTest.EXISTS))
-                gicon = new Gio.FileIcon({ file: Gio.File.new_for_path(CLAUDE_ICON_PATH) });
+            iconPath = iconPath || CLAUDE_ICON_PATH;
+            if (GLib.file_test(iconPath, GLib.FileTest.EXISTS))
+                gicon = new Gio.FileIcon({ file: Gio.File.new_for_path(iconPath) });
             notification = new MessageTray.Notification(source, title, body, { gicon: gicon });
             notification.setTransient(false);
             if (matchKey || (pids && pids.length)) {
