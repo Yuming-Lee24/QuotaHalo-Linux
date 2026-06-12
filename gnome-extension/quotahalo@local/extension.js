@@ -228,56 +228,95 @@ function compactAgo(epoch) {
     return Math.round(secs / 86400) + 'd';
 }
 
-// Claude Code sets each terminal's window title to the session title (with a
-// leading status glyph), so we locate a session's window by substring-matching
-// its title. Works when each session is its own window; tabs share one title.
-function findWindowByTitle(needle) {
-    var key = String(needle || '').trim().toLowerCase();
-    var actors;
-    var i;
-    var win;
-    var title;
+// Locate a session's terminal window. Claude Code sets the terminal title to
+// the session title; Codex has no title so we fall back to the project name and
+// the session's process ancestry. We prefer terminal-class windows and exact
+// title matches so a generic project name doesn't grab an editor/browser window
+// (e.g. a VS Code window showing the same project).
+var TERMINAL_WM_CLASS_RE = /term|kitty|alacritty|konsole|xterm|tilix|wezterm|foot|rxvt|ghostty/i;
 
-    if (!key)
-        return null;
-    actors = global.get_window_actors();
-    for (i = 0; i < actors.length; i++) {
-        win = actors[i].meta_window ||
-            (actors[i].get_meta_window ? actors[i].get_meta_window() : null);
-        if (!win || !win.get_title)
-            continue;
-        title = (win.get_title() || '').toLowerCase();
-        if (title.indexOf(key) >= 0)
-            return win;
+function windowWmClass(win) {
+    try {
+        return (win.get_wm_class && win.get_wm_class()) || '';
+    } catch (e) {
+        return '';
     }
-    return null;
 }
 
-// Fallback: focus a window owned by one of the session's ancestor processes
-// (its terminal). Exact for per-window terminals; for gnome-terminal's shared
-// server pid it brings a gnome-terminal window to the front.
-function findWindowByPids(pids) {
-    var set = {};
-    var actors;
+function isTerminalWindow(win) {
+    return TERMINAL_WM_CLASS_RE.test(windowWmClass(win));
+}
+
+function listWindows() {
+    var actors = global.get_window_actors();
+    var wins = [];
     var i;
     var win;
-    var pid;
 
-    if (!pids || !pids.length)
-        return null;
-    for (i = 0; i < pids.length; i++)
-        set[String(pids[i])] = true;
-    actors = global.get_window_actors();
     for (i = 0; i < actors.length; i++) {
         win = actors[i].meta_window ||
             (actors[i].get_meta_window ? actors[i].get_meta_window() : null);
-        if (!win || !win.get_pid)
-            continue;
-        pid = win.get_pid();
-        if (pid && set[String(pid)])
-            return win;
+        if (win && win.get_title)
+            wins.push(win);
     }
-    return null;
+    return wins;
+}
+
+function findSessionWindow(matchKey, pids) {
+    var key = String(matchKey || '').trim().toLowerCase();
+    var wins = listWindows();
+    var exactTerm = null;
+    var subTerm = null;
+    var subAny = null;
+    var termByPid = null;
+    var anyByPid = null;
+    var i;
+    var p;
+    var title;
+    var stripped;
+
+    if (key) {
+        for (i = 0; i < wins.length; i++) {
+            title = (wins[i].get_title() || '').toLowerCase();
+            if (title.indexOf(key) < 0)
+                continue;
+            stripped = title.replace(/^[^a-z0-9]+/, '');  // drop leading status glyph
+            if (isTerminalWindow(wins[i])) {
+                if (stripped === key && !exactTerm)
+                    exactTerm = wins[i];
+                if (!subTerm)
+                    subTerm = wins[i];
+            } else if (!subAny) {
+                subAny = wins[i];
+            }
+        }
+    }
+    if (exactTerm)
+        return exactTerm;
+    if (subTerm)
+        return subTerm;
+
+    // Match ancestor pids nearest-first (the terminal sits below any editor or
+    // shell higher up the tree), preferring a terminal-class window.
+    if (pids && pids.length) {
+        for (p = 0; p < pids.length && !termByPid; p++) {
+            for (i = 0; i < wins.length; i++) {
+                if (!wins[i].get_pid || wins[i].get_pid() !== pids[p])
+                    continue;
+                if (isTerminalWindow(wins[i])) {
+                    termByPid = wins[i];
+                    break;
+                }
+                if (!anyByPid)
+                    anyByPid = wins[i];
+            }
+        }
+    }
+    if (termByPid)
+        return termByPid;
+    if (subAny)
+        return subAny;
+    return anyByPid;
 }
 
 function readSessions(dir) {
@@ -2455,7 +2494,7 @@ QuotaHaloUsageIndicator.prototype = {
     },
 
     _focusSessionWindow: function(matchKey, pids) {
-        var win = findWindowByTitle(matchKey) || findWindowByPids(pids);
+        var win = findSessionWindow(matchKey, pids);
 
         if (win)
             Main.activateWindow(win);
